@@ -99,6 +99,18 @@ func (b Block) String() string {
 	return fmt.Sprintf("%s link=%d", b.Items, b.Link)
 }
 
+// Size returns the size of the block in bytes, from start of header to end of footer.
+func (b Block) Size() int {
+	size := 4 + 4 + 4 + 4 // Header+ItemLast+Link+Footer.
+	for i := range b.Items {
+		if b.Items[i].ItemType() == ItemTypeLast {
+			return -1 // Items should not contain ItemTypeLast
+		}
+		size += b.Items[i].Size()
+	}
+	return size
+}
+
 // NextBlockIdx returns the start and end indices of the next block.
 func NextBlockIdx(text []byte) (int, int, error) {
 	start := bytes.Index(text, startMarker)
@@ -158,6 +170,9 @@ func DecodeBlock(text []byte) (Block, int, error) {
 		return block, n, errors.New("found no last item type")
 	}
 	block.Items = block.Items[:len(block.Items)-1] // Discard LastItem type.
+	if block.Size() != n {
+		return block, n, fmt.Errorf("inconsistency in block size calculation, got %d, want %d", block.Size(), n)
+	}
 	return block, n, nil
 }
 

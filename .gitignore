@@ -16,7 +16,11 @@ vendor/
 *.dylib
 *.hex
 # `__debug_bin` Debug binary generated in VSCode when using the built-in debugger.
-*bin
+*_bin
+*.bin
+# The picobin binary when running go build ./cmd/picobin
+picobin
+!cmd/picobin
 
 # IDE
 .vscode/
