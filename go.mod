@@ -1,3 +1,3 @@
-module github.com/YOURUSER/YOURREPONAME
+module github.com/github.com/soypat/picobin
 
 go 1.20
