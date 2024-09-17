@@ -20,7 +20,8 @@ const (
 )
 
 type Flags struct {
-	block int
+	block    int
+	readsize int
 }
 
 func main() {
@@ -40,6 +41,7 @@ func run() error {
 		flag.PrintDefaults()
 	}
 	flag.IntVar(&flags.block, "block", -1, "Specify a single block to analyze")
+	flag.IntVar(&flags.readsize, "readlim", 2*MB, "Size of haystack to look for blocks in, starting at ROM start address")
 	flag.Parse()
 	command := flag.Arg(0)
 	source := flag.Arg(1)
@@ -77,7 +79,7 @@ func run() error {
 }
 
 func info(f *elf.File, flags Flags) error {
-	blocks, start, err := getBlocks(f)
+	blocks, start, err := getBlocks(f, flags)
 	if err != nil {
 		return err
 	}
@@ -104,7 +106,7 @@ func info(f *elf.File, flags Flags) error {
 }
 
 func dump(f *elf.File, flags Flags) error {
-	blocks, start, err := getBlocks(f)
+	blocks, start, err := getBlocks(f, flags)
 	if err != nil {
 		return err
 	}
@@ -132,7 +134,7 @@ func dump(f *elf.File, flags Flags) error {
 	return nil
 }
 
-func getBlocks(f *elf.File) ([]picobin.Block, int64, error) {
+func getBlocks(f *elf.File, flags Flags) ([]picobin.Block, int64, error) {
 	seenAddrs := make(map[int]struct{})
 	uromStart, _, err := elfutil.GetROMAddr(f)
 	romStart := int64(uromStart)
