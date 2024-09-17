@@ -10,7 +10,7 @@ import (
 	"os"
 
 	"github.com/github.com/soypat/picobin"
-	"golang.org/x/exp/constraints"
+	"github.com/github.com/soypat/picobin/elfutil"
 )
 
 const (
@@ -52,8 +52,10 @@ func run() error {
 	switch command {
 	case "info":
 		cmd = info
+
 	case "dump":
 		cmd = dump
+
 	default:
 		flag.Usage()
 		return errors.New("uknown command: " + command)
@@ -85,11 +87,18 @@ func info(f *elf.File, flags Flags) error {
 			addr += int64(block.Link)
 			continue
 		}
+
 		fmt.Printf("BLOCK%d @ Addr=%#x Size=%d Items=%d\n", i, addr, block.Size(), len(block.Items))
 		for _, item := range block.Items {
 			fmt.Printf("\t%s\n", item.String())
 		}
 		addr += int64(block.Link)
+	}
+	for i, block := range blocks {
+		err = block.Validate()
+		if err != nil {
+			fmt.Printf("BLOCK%d failed to validate: %s\n", i, err.Error())
+		}
 	}
 	return nil
 }
@@ -111,7 +120,7 @@ func dump(f *elf.File, flags Flags) error {
 			break // Last block.
 		}
 		data := make([]byte, dataSize)
-		n, err := readAddr(f, addr+int64(blockSize), data)
+		n, err := elfutil.ReadAtAddr(f, addr+int64(blockSize), data)
 		if err != nil {
 			return err
 		} else if n == 0 {
@@ -124,77 +133,42 @@ func dump(f *elf.File, flags Flags) error {
 }
 
 func getBlocks(f *elf.File) ([]picobin.Block, int64, error) {
-	var flash [2 * MB]byte
-	const flashAddr = 0x10000000
-	flashEnd, err := readAddr(f, flashAddr, flash[:])
+	seenAddrs := make(map[int]struct{})
+	uromStart, _, err := elfutil.GetROMAddr(f)
+	romStart := int64(uromStart)
 	if err != nil {
 		return nil, 0, err
 	}
-	start0, _, err := picobin.NextBlockIdx(flash[:flashEnd])
+	ROM := make([]byte, 2*MB)
+	flashEnd, err := elfutil.ReadAtAddr(f, romStart, ROM[:])
 	if err != nil {
 		return nil, 0, err
 	}
+	start0, _, err := picobin.NextBlockIdx(ROM[:flashEnd])
+	if err != nil {
+		return nil, 0, err
+	}
+	seenAddrs[start0] = struct{}{}
 	var blocks []picobin.Block
 	start := start0
-	startAbs := int64(start) + flashAddr
+	startAbs := int64(start) + romStart
 	for {
-		absAddr := start + flashAddr
-		block, _, err := picobin.DecodeBlock(flash[start:flashEnd])
+		absAddr := int64(start) + romStart
+		block, _, err := picobin.DecodeBlock(ROM[start:flashEnd])
 		if err != nil {
 			return blocks, startAbs, fmt.Errorf("decoding block at Addr=%#x: %w", absAddr, err)
 		}
 		blocks = append(blocks, block)
 		nextStart := start + block.Link
-		if nextStart == start0 {
-			break // Found last block.
+		_, alreadySeen := seenAddrs[nextStart]
+		if alreadySeen {
+			if nextStart == start0 {
+				break // Found last block.
+			}
+			return blocks, startAbs, fmt.Errorf("odd cyclic block at Addr=%#x", absAddr)
 		}
+		seenAddrs[nextStart] = struct{}{}
 		start = nextStart
 	}
 	return blocks, startAbs, nil
-}
-
-func readAddr(f *elf.File, addr int64, b []byte) (int, error) {
-	clear(b)
-	end := addr + int64(len(b))
-	maxReadIdx := 0
-	for _, section := range f.Sections {
-		saddr := int64(section.Addr)
-		send := saddr + int64(section.Size)
-		if aliases(addr, end, saddr, send) {
-			data, err := section.Data()
-			if err != nil {
-				return 0, err
-			}
-			sectOff := max(0, int(addr-saddr))
-			bOff := max(0, int(saddr-addr))
-			n := copy(b[bOff:], data[sectOff:])
-			maxReadIdx = max(maxReadIdx, n+bOff)
-		}
-	}
-	return maxReadIdx, nil
-}
-
-func aliases(start0, end0, start1, end1 int64) bool {
-	return start0 < end1 && end0 > start1
-}
-
-func clear[E any](a []E) {
-	var z E
-	for i := range a {
-		a[i] = z
-	}
-}
-
-func max[T constraints.Integer](a, b T) T {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min[T constraints.Integer](a, b T) T {
-	if a < b {
-		return a
-	}
-	return b
 }

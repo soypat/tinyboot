@@ -17,6 +17,14 @@ func (it Item) HeaderBytes() [4]byte {
 	return [4]byte{it.Head, byte(it.SizeAndSpecial), byte(it.SizeAndSpecial >> 8), it.TypeData}
 }
 
+func (it Item) Validate() error {
+	sz := it.Size()
+	if sz != 4+len(it.Data) {
+		return fmt.Errorf("item size %d, but have %d data", sz, len(it.Data))
+	}
+	return nil
+}
+
 type ItemType uint8
 
 // ItemType definitions.
@@ -42,7 +50,7 @@ const (
 	ItemTypeLast    ItemType = 0x7f // last
 )
 
-func (it Item) sizeflag() bool { return it.Head&1 != 0 }
+func (it Item) sizeflag() bool { return it.Head&maskByteSize2 != 0 }
 
 // Size returns the size in bytes of the item.
 func (it Item) Size() int {

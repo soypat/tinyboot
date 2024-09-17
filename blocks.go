@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 //go:generate stringer -type="ImageType,ExeCPU,ExeChip,ExeSec,ItemType" -linecomment -output stringers.go .
@@ -13,6 +14,8 @@ import (
 const (
 	BlockMarkerStart = 0xffffded3
 	BlockMarkerEnd   = 0xab123579
+	minBlockSize     = 4 + 4 + 4 + 4 // Header + last_item + Link + Footer
+	maskByteSize2    = 1
 )
 
 var (
@@ -28,13 +31,38 @@ type Block struct {
 	Link int
 }
 
+// Validate performs all possible static checks on the block and its items for saneness.
+func (b Block) Validate() error {
+	sz := b.Size()
+	if b.Link > math.MaxInt32 || b.Link < math.MinInt32 {
+		return errors.New("block link overflows int32")
+	} else if b.Link < sz && b.Link > -minBlockSize {
+		return errors.New("block link points to memory inside itself or to impossible block")
+	}
+	expectSz := minBlockSize
+	for i := range b.Items {
+		if b.Items[i].ItemType() == ItemTypeLast {
+			return errors.New("block contains last item type")
+		}
+		err := b.Items[i].Validate()
+		if err != nil {
+			return fmt.Errorf("block item %d (%s): %w", i, b.Items[i].String(), err)
+		}
+		expectSz += len(b.Items[i].Data) + 4
+	}
+	if sz != expectSz {
+		return fmt.Errorf("expected %d size, got %d", expectSz, sz)
+	}
+	return nil
+}
+
 func (b Block) String() string {
 	return fmt.Sprintf("%s link=%d", b.Items, b.Link)
 }
 
 // Size returns the size of the block in bytes, from start of header to end of footer.
 func (b Block) Size() int {
-	size := 4 + 4 + 4 + 4 // Header+ItemLast+Link+Footer.
+	size := minBlockSize // Header+ItemLast+Link+Footer.
 	for i := range b.Items {
 		if b.Items[i].ItemType() == ItemTypeLast {
 			return -1 // Items should not contain ItemTypeLast
@@ -44,7 +72,10 @@ func (b Block) Size() int {
 	return size
 }
 
-// NextBlockIdx returns the start and end indices of the next block.
+// NextBlockIdx returns the start and end indices of the next block by looking for start marker. If only looking for block start
+// one can use the following one-liner:
+//
+//	nextBlockStart := bytes.Index(text, binary.LittleEndian.AppendUint32(nil, picobin.BlockMarkerStart))
 func NextBlockIdx(text []byte) (int, int, error) {
 	start := bytes.Index(text, startMarker)
 	if start < 0 {
@@ -62,6 +93,9 @@ func NextBlockIdx(text []byte) (int, int, error) {
 	return start, end, nil
 }
 
+// DecodeBlock decodes the block at the start of text. It returns amount of bytes read until the end block marker end.
+// If the block is malformed it fails to decode and returns error. Note block is not fully validated after being decoded.
+// Call [Block.Validate] to ensure block saneness after decoding.
 func DecodeBlock(text []byte) (Block, int, error) {
 	if len(text) < 12 {
 		return Block{}, 0, errors.New("buffer shorter than minimum block size")
@@ -130,6 +164,34 @@ func DecodeNextItem(blockText []byte) (Item, int, error) {
 		item.Data = blockText[4:size]
 	}
 	return item, size, nil
+}
+
+// AppendTo appends block to dst without checking data. Call [Block.Validate] before
+// AppendTo to ensure data being appended is sane.
+func (b Block) AppendTo(dst []byte) []byte {
+	dst = binary.LittleEndian.AppendUint32(dst, BlockMarkerStart)
+	size := 0
+	for i := range b.Items {
+		size += b.Items[i].Size()
+		header := b.Items[i].HeaderBytes()
+		dst = append(dst, header[:]...)
+		dst = append(dst, b.Items[i].Data...)
+	}
+	dst = appendLastItem(dst, size)
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(int32(b.Link)))
+	dst = binary.LittleEndian.AppendUint32(dst, BlockMarkerEnd)
+	return dst
+}
+
+func appendLastItem(dst []byte, totalSizeItemsBytes int) []byte {
+	item := Item{
+		Head:           byte(ItemTypeLast<<1) | maskByteSize2,
+		SizeAndSpecial: uint16(totalSizeItemsBytes / 4),
+		TypeData:       0, // pad.
+	}
+	header := item.HeaderBytes()
+	dst = append(dst, header[:]...)
+	return dst
 }
 
 // func makeLOADMAP(absolute bool, entries []loadMapEntry) {

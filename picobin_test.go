@@ -33,6 +33,14 @@ func TestBlinkyParse(t *testing.T) {
 	if start2 != start0 {
 		t.Errorf("expected 2 blocks only, second linking to first, got start2=%d", start2)
 	}
+	err = blk0.Validate()
+	if err != nil {
+		t.Error(err)
+	}
+	err = blk1.Validate()
+	if err != nil {
+		t.Error(err)
+	}
 	t.Logf("BLOCK0:%s  BLOCK1:%s", blk0, blk1)
 }
 
