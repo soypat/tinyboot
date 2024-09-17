@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
@@ -50,13 +51,16 @@ func run() error {
 		flag.Usage()
 		return errors.New("missing command argument")
 	}
-	var cmd func(*elf.File, Flags) error
+	var cmd func(io.ReaderAt, Flags) error
 	switch command {
 	case "info":
 		cmd = info
 
 	case "dump":
 		cmd = dump
+
+	case "uf2info":
+		cmd = uf2info
 
 	default:
 		flag.Usage()
@@ -68,7 +72,8 @@ func run() error {
 		flag.Usage()
 		return errors.New("missing filename argument")
 	}
-	file, err := elf.Open(source)
+	file, err := os.Open(source)
+	// file, err := elf.Open(source)
 	if err != nil {
 		return err
 	}
@@ -78,7 +83,11 @@ func run() error {
 	return cmd(file, flags)
 }
 
-func info(f *elf.File, flags Flags) error {
+func info(r io.ReaderAt, flags Flags) error {
+	f, err := elf.NewFile(r)
+	if err != nil {
+		return err
+	}
 	blocks, start, err := getBlocks(f, flags)
 	if err != nil {
 		return err
@@ -105,7 +114,11 @@ func info(f *elf.File, flags Flags) error {
 	return nil
 }
 
-func dump(f *elf.File, flags Flags) error {
+func dump(r io.ReaderAt, flags Flags) error {
+	f, err := elf.NewFile(r)
+	if err != nil {
+		return err
+	}
 	blocks, start, err := getBlocks(f, flags)
 	if err != nil {
 		return err
@@ -134,7 +147,7 @@ func dump(f *elf.File, flags Flags) error {
 	return nil
 }
 
-func getBlocks(f *elf.File, flags Flags) ([]picobin.Block, int64, error) {
+func getBlocks(f *elf.File, _ Flags) ([]picobin.Block, int64, error) {
 	seenAddrs := make(map[int]struct{})
 	uromStart, _, err := elfutil.GetROMAddr(f)
 	romStart := int64(uromStart)

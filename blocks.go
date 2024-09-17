@@ -23,6 +23,7 @@ var (
 	endMarker   = binary.LittleEndian.AppendUint32(nil, BlockMarkerEnd)
 )
 
+// Block represents a single valid picobin block in full. It's item list cannot contain the last item type.
 type Block struct {
 	// Items is a list of items not including the ItemTypeLast item.
 	Items []Item

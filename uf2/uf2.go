@@ -3,6 +3,8 @@ package uf2
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"strconv"
 )
@@ -54,6 +56,13 @@ func (b Block) AppendTo(dst []byte) []byte {
 	return dst
 }
 
+func (block Block) String() string {
+	if block.Flags&FlagFamilyIDPresent != 0 {
+		return fmt.Sprintf("Block %2d/%2d flags=%#x size=%d family=%#x addr=%#x", block.BlockNum+1, block.NumBlocks, block.Flags, block.PayloadSize, block.SizeOrFamilyID, block.TargetAddr)
+	}
+	return fmt.Sprintf("Block %2d/%2d flags=%#x size=%d/%d addr=%#x", block.BlockNum+1, block.NumBlocks, block.Flags, block.PayloadSize, block.SizeOrFamilyID, block.TargetAddr)
+}
+
 // HeaderBytes returns the block's HeaderBytes.
 func (b Block) HeaderBytes() (hd [32]byte) {
 	binary.LittleEndian.PutUint32(hd[0:], MagicStart0)
@@ -76,6 +85,36 @@ func (b *Block) Data() ([]byte, error) {
 		return nil, errors.New("zero payload size")
 	}
 	return b.RawData[:sz], nil
+}
+
+func DecodeAppendBlocks(dst []Block, r io.Reader, buf []byte) ([]Block, int, error) {
+	if len(buf) < BlockSize {
+		return dst, 0, errors.New("decode buffer to small to fit a block")
+	}
+	// Round size of buffer to block size.
+	buf = buf[:len(buf)-len(buf)%BlockSize]
+	ntot := 0
+	numBlocks := 0
+	for {
+		n, err := io.ReadFull(r, buf)
+		ntot += n
+		i := 0
+		for i+BlockSize <= n {
+			block, err := DecodeBlock(buf[i:])
+			if err != nil {
+				return dst, ntot, err
+			}
+			dst = append(dst, block)
+			i += BlockSize
+			numBlocks++
+		}
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				err = nil
+			}
+			return dst, ntot, err
+		}
+	}
 }
 
 // DecodeBlock decodes a 512 byte block from the argument buffer. Buffer must be at least 512 bytes long.
@@ -191,10 +230,10 @@ func (f *Formatter) forEachBlock(data []byte, targetAddr uint32, fn func(Block) 
 		return err
 	}
 	remaining := block.BlockNum
-	payload := block.PayloadSize
+	maxPayload := block.PayloadSize
 	dataOff := 0
 	for remaining > 0 {
-		block.PayloadSize = uint32(copy(block.RawData[:payload], data[dataOff:]))
+		block.PayloadSize = uint32(copy(block.RawData[:maxPayload], data[dataOff:]))
 		oob := block.RawData[block.PayloadSize:]
 		for i := range oob {
 			oob[i] = 0 // Clear memory out of bounds.
@@ -203,6 +242,7 @@ func (f *Formatter) forEachBlock(data []byte, targetAddr uint32, fn func(Block) 
 		if err != nil {
 			return err
 		}
+		block.TargetAddr += block.PayloadSize
 		block.BlockNum++
 		remaining--
 	}
