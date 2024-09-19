@@ -6,47 +6,60 @@ import (
 	"io"
 )
 
-func GetROMAddr(f *elf.File) (start, end uint64, err error) {
+// SectionIsROM checks if the section is meant to exist on firmware.
+func SectionIsROM(section *elf.Section) bool {
+	return section.Type == elf.SHT_PROGBITS && section.Flags&elf.SHF_ALLOC != 0
+}
+
+// ProgIsROM checks if the program header memory lives on the read only memory (flash).
+func ProgIsROM(prog *elf.Prog) bool {
+	return prog.Type == elf.PT_LOAD && prog.Filesz > 0 && prog.Off > 0
+
+}
+
+func GetROMAddr(f *elf.File) (startAddr, endAddr uint64, err error) {
 	// Find the lowest section address.
-	startAddr := ^uint64(0)
-	endAddr := uint64(0)
-	for _, section := range f.Sections {
-		if section.Type != elf.SHT_PROGBITS || section.Flags&elf.SHF_ALLOC == 0 {
+	startAddr = ^uint64(0)
+	for _, prog := range f.Progs {
+		if !ProgIsROM(prog) {
 			continue
 		}
-		if section.Addr < startAddr {
-			startAddr = section.Addr
+		if prog.Paddr < startAddr {
+			startAddr = prog.Paddr
 		}
-		if section.Addr+section.Size > endAddr {
-			endAddr = section.Addr + section.Size
+		endProg := prog.Paddr + prog.Memsz
+		if endProg > endAddr {
+			endAddr = endProg
 		}
 	}
 	if startAddr > endAddr {
 		return 0, 0, errors.New("no ROM sections found")
 	}
-	return startAddr, end, nil
+	return startAddr, endAddr, nil
 }
 
-// ReadAtAddr reads from the binary sections representing read-only-memory (ROM) starting at address addr.
-func ReadAtAddr(f *elf.File, addr int64, b []byte) (int, error) {
+// ReadAt reads from the binary sections representing read-only-memory (ROM) starting at address addr.
+func ReadAt(f *elf.File, b []byte, addr int64) (int, error) {
+	if addr < 0 {
+		return 0, errors.New("negative address")
+	}
 	clear(b)
 	end := addr + int64(len(b))
 	maxReadIdx := 0
 	for _, prog := range f.Progs {
-		if prog.Type != elf.PT_LOAD || prog.Filesz == 0 || prog.Off == 0 {
-			continue
-		}
 		paddr := int64(prog.Paddr)
 		pend := paddr + int64(prog.Memsz)
-		if aliases(addr, end, paddr, pend) {
-			progOff := max(0, int(addr-paddr))
-			bOff := max(0, int(paddr-addr))
-			n, err := prog.ReadAt(b[bOff:], int64(progOff))
-			if err != nil && err != io.EOF {
-				return maxReadIdx, err
-			}
-			maxReadIdx = max(maxReadIdx, n+bOff)
+		if !ProgIsROM(prog) || !aliases(addr, end, paddr, pend) {
+			continue
 		}
+
+		progOff := max(0, addr-paddr)
+		bOff := max(0, paddr-addr)
+		n, err := prog.ReadAt(b[bOff:], progOff)
+		if err != nil && err != io.EOF {
+			return maxReadIdx, err
+		}
+		maxReadIdx = max(maxReadIdx, n+int(bOff))
 	}
 	return maxReadIdx, nil
 }

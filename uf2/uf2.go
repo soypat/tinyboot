@@ -229,7 +229,7 @@ func (f *Formatter) forEachBlock(data []byte, targetAddr uint32, fn func(Block) 
 	if err != nil {
 		return err
 	}
-	remaining := block.BlockNum
+	remaining := block.NumBlocks
 	maxPayload := block.PayloadSize
 	dataOff := 0
 	for remaining > 0 {
@@ -242,6 +242,7 @@ func (f *Formatter) forEachBlock(data []byte, targetAddr uint32, fn func(Block) 
 		if err != nil {
 			return err
 		}
+		dataOff += int(block.PayloadSize)
 		block.TargetAddr += block.PayloadSize
 		block.BlockNum++
 		remaining--

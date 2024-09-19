@@ -1,14 +1,17 @@
 package main
 
 import (
-	"debug/elf"
+	"os"
 	"testing"
 )
 
 func TestDump(t *testing.T) {
-	fp, err := elf.Open("../../blink.elf")
+	fp, err := os.Open("../../blink.elf")
 	if err != nil {
 		t.Fatal(err)
 	}
-	dump(fp, Flags{block: 0})
+	err = uf2conv(fp, Flags{readsize: 2 * MB, argSourcename: "blink.uf2", flashend: defaultFlashEnd})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
