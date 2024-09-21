@@ -78,13 +78,22 @@ func (b Block) HeaderBytes() (hd [32]byte) {
 
 // Data returns a pointer to this block's data field limited to the payload size it has.
 func (b *Block) Data() ([]byte, error) {
+	err := b.Validate()
+	if err != nil {
+		return nil, err
+	}
+	return b.RawData[:b.PayloadSize], nil
+}
+
+// Validate checks block fields for inconsistencies.
+func (b *Block) Validate() error {
 	sz := b.PayloadSize
 	if sz > BlockMaxData {
-		return nil, errors.New("payload size exeeds permissible maximum")
+		return errors.New("payload size exeeds permissible maximum")
 	} else if sz == 0 {
-		return nil, errors.New("zero payload size")
+		return errors.New("zero payload size")
 	}
-	return b.RawData[:sz], nil
+	return nil
 }
 
 func DecodeAppendBlocks(dst []Block, r io.Reader, buf []byte) ([]Block, int, error) {
@@ -248,4 +257,76 @@ func (f *Formatter) forEachBlock(data []byte, targetAddr uint32, fn func(Block) 
 		remaining--
 	}
 	return nil
+}
+
+func NewBlocksReaderAt(blocks []Block) (*BlocksReaderAt, error) {
+	obj := BlocksReaderAt{
+		blks:    blocks,
+		minAddr: 0xffff_ffff,
+	}
+	for i := range blocks {
+		err := blocks[i].Validate()
+		if err != nil {
+			return nil, err
+		}
+		obj.minAddr = min(obj.minAddr, blocks[i].TargetAddr)
+		obj.maxAddr = max(obj.maxAddr, blocks[i].TargetAddr+blocks[i].PayloadSize)
+	}
+	return &obj, nil
+}
+
+type BlocksReaderAt struct {
+	blks             []Block
+	minAddr, maxAddr uint32
+}
+
+func (blks *BlocksReaderAt) Addrs() (start, end uint32) {
+	return blks.minAddr, blks.maxAddr
+}
+
+func (blks *BlocksReaderAt) ReadAt(b []byte, addr int64) (int, error) {
+	blocks := blks.blks
+	end := addr + int64(len(b))
+	if !aliases(addr, end, int64(blks.minAddr), int64(blks.maxAddr)) {
+		return 0, io.EOF
+	}
+	clear(b)
+	maxRead := 0
+	for i := range blocks {
+		blkAddr := int64(blocks[i].TargetAddr)
+		blkEnd := blkAddr + int64(blocks[i].PayloadSize)
+		if !aliases(addr, end, blkAddr, blkEnd) {
+			continue
+		}
+		// progOff := max(0, addr-blkAddr)
+		bOff := max(0, blkAddr-addr)
+		n := copy(b[bOff:], blocks[i].RawData[:blocks[i].PayloadSize])
+		maxRead = int(bOff) + n
+	}
+	return maxRead, nil
+}
+
+func aliases(start0, end0, start1, end1 int64) bool {
+	return start0 < end1 && end0 > start1
+}
+
+func max[T ~int | ~int64 | ~uint32 | ~uint64](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min[T ~int | ~int64 | ~uint32 | ~uint64](a, b T) T {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func clear[E any](a []E) {
+	var z E
+	for i := range a {
+		a[i] = z
+	}
 }

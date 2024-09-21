@@ -25,30 +25,11 @@ func elfinfo(r io.ReaderAt, flags Flags) error {
 	}
 	fmt.Printf("total program memory=%d\n", totalSize)
 
-	blocks, start, err := getBlocks(f, flags)
+	blocks, start, err := elfBlocks(f, flags)
 	if err != nil {
 		return err
 	}
-	addr := start
-	for i, block := range blocks {
-		if flags.block >= 0 && i != flags.block {
-			addr += int64(block.Link)
-			continue
-		}
-
-		fmt.Printf("\nBLOCK%d @ Addr=%#x Size=%d Items=%d\n", i, addr, block.Size(), len(block.Items))
-		for _, item := range block.Items {
-			fmt.Printf("\t%s\n", item.String())
-		}
-		addr += int64(block.Link)
-	}
-	for i, block := range blocks {
-		err = block.Validate()
-		if err != nil {
-			fmt.Printf("BLOCK%d failed to validate: %s\n", i, err.Error())
-		}
-	}
-	return nil
+	return blockInfo(blocks, start, flags)
 }
 
 func elfdump(r io.ReaderAt, flags Flags) error {
@@ -56,14 +37,15 @@ func elfdump(r io.ReaderAt, flags Flags) error {
 	if err != nil {
 		return err
 	}
-	blocks, start, err := getBlocks(f, flags)
+	blocks, start, err := elfBlocks(f, flags)
 	if err != nil {
 		return err
 	}
+
 	addr := start
 	for i, block := range blocks {
 		if flags.block >= 0 && i != flags.block || len(block.Items) >= 1 && block.Items[0].ItemType() == picobin.ItemTypeIgnored {
-			addr += int64(block.Link)
+			addr += uint64(block.Link)
 			continue
 		}
 		blockSize := block.Size()
@@ -72,20 +54,19 @@ func elfdump(r io.ReaderAt, flags Flags) error {
 			break // Last block.
 		}
 		data := make([]byte, dataSize)
-		n, err := elfutil.ReadAt(f, data, addr+int64(blockSize))
+		n, err := elfutil.ReadAt(f, data, int64(addr)+int64(blockSize))
 		if err != nil {
 			return err
 		} else if n == 0 {
 			return errors.New("unable to extract data after block")
 		}
 		fmt.Printf("BLOCK%d @ Addr=%#x dump:\n%s", i, addr, hex.Dump(data))
-		addr += int64(block.Link)
+		addr += uint64(block.Link)
 	}
 	return nil
 }
 
-func getBlocks(f *elf.File, flags Flags) ([]picobin.Block, int64, error) {
-	seenAddrs := make(map[int]struct{})
+func elfBlocks(f *elf.File, flags Flags) ([]picobin.Block, uint64, error) {
 	uromStart, uromEnd, err := elfutil.GetROMAddr(f)
 	if err != nil {
 		return nil, 0, err
@@ -101,32 +82,11 @@ func getBlocks(f *elf.File, flags Flags) ([]picobin.Block, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	start0, _, err := picobin.NextBlockIdx(ROM[:flashEnd])
+	blocks, block0Start, err := romBlocks(ROM[:flashEnd], uromStart)
 	if err != nil {
-		return nil, 0, err
+		return blocks, 0, err
 	}
-	seenAddrs[start0] = struct{}{}
-	var blocks []picobin.Block
-	start := start0
-	startAbs := int64(start) + romStart
-	for {
-		absAddr := int64(start) + romStart
-		block, _, err := picobin.DecodeBlock(ROM[start:flashEnd])
-		if err != nil {
-			return blocks, startAbs, fmt.Errorf("decoding block at Addr=%#x: %w", absAddr, err)
-		}
-		blocks = append(blocks, block)
-		nextStart := start + block.Link
-		_, alreadySeen := seenAddrs[nextStart]
-		if alreadySeen {
-			if nextStart == start0 {
-				break // Found last block.
-			}
-			return blocks, startAbs, fmt.Errorf("odd cyclic block at Addr=%#x", absAddr)
-		}
-		seenAddrs[nextStart] = struct{}{}
-		start = nextStart
-	}
+	startAbs := uint64(block0Start) + uromStart
 	return blocks, startAbs, nil
 }
 

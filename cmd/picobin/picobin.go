@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"os"
+
+	"github.com/github.com/soypat/picobin"
 )
 
 const (
@@ -90,4 +92,60 @@ func run() error {
 
 	// Finally run command.
 	return cmd(file, flags)
+}
+
+func romBlocks(ROM []byte, romStartAddr uint64) (blocks []picobin.Block, block0Off int, err error) {
+	block0Off, _, err = picobin.NextBlockIdx(ROM)
+	if err != nil {
+		return nil, 0, err
+	}
+	seenAddrs := make(map[int]struct{})
+	seenAddrs[block0Off] = struct{}{}
+	start := block0Off
+	for {
+		absAddr := uint64(start) + romStartAddr
+		block, _, err := picobin.DecodeBlock(ROM[start:])
+		if err != nil {
+			return blocks, block0Off, fmt.Errorf("decoding block at Addr=%#x: %w", absAddr, err)
+		}
+		blocks = append(blocks, block)
+		nextStart := start + block.Link
+		_, alreadySeen := seenAddrs[nextStart]
+		if alreadySeen {
+			if nextStart == block0Off {
+				break // Found last block.
+			}
+			return blocks, block0Off, fmt.Errorf("odd cyclic block at Addr=%#x", absAddr)
+		}
+		seenAddrs[nextStart] = struct{}{}
+		start = nextStart
+	}
+	return blocks, block0Off, nil
+}
+
+func blockInfo(blocks []picobin.Block, block0Start uint64, flags Flags) (err error) {
+	if len(blocks) == 0 {
+		return errors.New("no blocks found")
+	}
+	fmt.Println("ROM Block info:")
+	addr := block0Start
+	for i, block := range blocks {
+		if flags.block >= 0 && i != flags.block {
+			addr += uint64(block.Link)
+			continue
+		}
+
+		fmt.Printf("BLOCK%d @ Addr=%#x Size=%d Items=%d\n", i, addr, block.Size(), len(block.Items))
+		for _, item := range block.Items {
+			fmt.Printf("\t%s\n", item.String())
+		}
+		addr += uint64(block.Link)
+	}
+	for i, block := range blocks {
+		err = block.Validate()
+		if err != nil {
+			fmt.Printf("BLOCK%d failed to validate:\n\t%s\n", i, err.Error())
+		}
+	}
+	return nil
 }
