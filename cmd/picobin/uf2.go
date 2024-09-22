@@ -94,6 +94,18 @@ func uf2ROM(uf2blocks []uf2.Block, flags Flags) (ROM []byte, romAddr uint64, err
 	return ROM, uint64(start), nil
 }
 
+func uf2dump(r io.ReaderAt, flags Flags) error {
+	uf2blocks, err := newUF2File(r, flags)
+	if err != nil {
+		return err
+	}
+	ROM, startaddr, err := uf2ROM(uf2blocks, flags)
+	if err != nil {
+		return err
+	}
+	return romDump(ROM, uint64(startaddr), flags)
+}
+
 func newUF2File(r io.ReaderAt, _ Flags) ([]uf2.Block, error) {
 	wrapper := &readeratReader{ReaderAt: r}
 	var blocks []uf2.Block = make([]uf2.Block, 0, 256)

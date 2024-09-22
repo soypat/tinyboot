@@ -50,7 +50,7 @@ func elfROM(f *elf.File, flags Flags) (ROM []byte, romAddr uint64, err error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	err = elfutil.EnsureROMContiguous(f, uromStart, uromEnd)
+	err = elfutil.EnsureROMContiguous(f, uromStart, uromEnd, 0)
 	if err != nil {
 		return nil, uromStart, err
 	}
@@ -60,7 +60,7 @@ func elfROM(f *elf.File, flags Flags) (ROM []byte, romAddr uint64, err error) {
 		romSize = uint64(flags.readsize)
 	}
 	ROM = make([]byte, romSize)
-	flashEnd, err := elfutil.ReadAt(f, ROM[:], uromStart)
+	flashEnd, err := elfutil.ReadROMAt(f, ROM[:], uromStart)
 	if err != nil {
 		return nil, 0, err
 	} else if flashEnd > int(flags.readsize) {

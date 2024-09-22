@@ -43,8 +43,8 @@ func run() error {
 	flag.Usage = func() {
 		output := flag.CommandLine.Output()
 		fmt.Fprintf(output, "Usage of %s:\n", os.Args[0])
-		fmt.Fprintf(output, "\tavailable commands: [elfinfo, elfdump, uf2info]\n")
-		fmt.Fprintf(output, "Example:\n\tpicobin info <ELF-filename>\n")
+		fmt.Fprintf(output, "\tavailable commands: [elfinfo, elfdump, uf2info, uf2dump, uf2conv]\n")
+		fmt.Fprintf(output, "Example:\n\tpicobin [flags] <command> <filename>\n")
 		flag.PrintDefaults()
 	}
 	flag.IntVar(&flags.block, "block", -1, "Specify a single block to analyze")
@@ -71,6 +71,9 @@ func run() error {
 	case "uf2info":
 		cmd = uf2info
 
+	case "uf2dump":
+		cmd = uf2dump
+
 	case "uf2conv":
 		cmd = uf2conv
 
@@ -85,7 +88,6 @@ func run() error {
 		return errors.New("missing filename argument")
 	}
 	file, err := os.Open(source)
-	// file, err := elf.Open(source)
 	if err != nil {
 		return err
 	}
@@ -167,7 +169,12 @@ func romDump(ROM []byte, startAddr uint64, flags Flags) (err error) {
 			break // Last block.
 		}
 		addr := startAddr + uint64(off)
-		fmt.Printf("BLOCK%d @ Addr=%#x dump:\n%s", i, addr, hex.Dump(ROM[off:nextOff]))
+
+		fmt.Printf("\nBLOCK%d @ Addr=%#x dump:\n", i, addr)
+		hd := hex.Dumper(os.Stdout)
+		hd.Write(ROM[off:nextOff])
+		hd.Close()
+
 		off += int(block.Link)
 	}
 	return nil

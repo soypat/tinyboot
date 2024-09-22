@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/soypat/tinyboot/branch/main/graph/badge.svg)](https://codecov.io/gh/soypat/tinyboot)
 [![Go](https://github.com/soypat/tinyboot/actions/workflows/go.yml/badge.svg)](https://github.com/soypat/tinyboot/actions/workflows/go.yml)
 
-Tool for working with program builds and bootable partitions.
+Tools for working with program builds and bootable partitions.
 
 How to install package with newer versions of Go (+1.16):
 ```sh

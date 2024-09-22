@@ -19,6 +19,7 @@ func ProgIsROM(prog *elf.Prog) bool {
 
 }
 
+// ROMAddr returns the read-only memory start and end address of the ELF file.
 func ROMAddr(f *elf.File) (startAddr, endAddr uint64, err error) {
 	if len(f.Sections) == 0 || len(f.Progs) == 0 {
 		return 0, 0, errors.New("no sections and/or progs in ELF")
@@ -68,18 +69,23 @@ func ROMAddr(f *elf.File) (startAddr, endAddr uint64, err error) {
 	return startAddr, endAddr, nil
 }
 
-// EnsureROMContiguous checks ROM program memory is contiguously represented between startAddr and endAddr addresses and returns error if not contiguous.
-func EnsureROMContiguous(f *elf.File, startAddr, endAddr uint64) error {
+// EnsureROMContiguous checks ROM program memory is contiguously represented between startAddr and endAddr addresses and returns error if not contiguous
+// to within maxContiguousDiff bytes.
+func EnsureROMContiguous(f *elf.File, startAddr, endAddr, maxContiguousDiff uint64) error {
+	if maxContiguousDiff > math.MaxInt {
+		return errors.New("contiguous diff overflows int, possible signed integer conversion bug")
+	}
 	// TODO(soypat): maybe use a more elegant, non-brute approach... but really this is more than good enough for non-adversarial input. O(n) time for sorted inputs. O(n^2) for adversarial input. ELF is typically more or less sorted...
 	contiguousUpTo := startAddr
 	for c := 0; c < len(f.Progs); c++ {
 		for _, prog := range f.Progs {
 			pstart := prog.Paddr
 			pend := pstart + prog.Memsz
-			if !ProgIsROM(prog) || !aliases(contiguousUpTo, contiguousUpTo+1, pstart, pend) {
+			maxContiguousAddr := contiguousUpTo + maxContiguousDiff
+			if !ProgIsROM(prog) || pstart > maxContiguousAddr || !aliases(contiguousUpTo, maxContiguousAddr+1, pstart, pend) {
 				continue
 			}
-			if pstart != contiguousUpTo {
+			if maxContiguousDiff == 0 && pstart < contiguousUpTo {
 				return fmt.Errorf("ROM memory not contiguous between %#x..%#x, found data overlap at %#x", startAddr, endAddr, contiguousUpTo)
 			}
 			contiguousUpTo = pend
@@ -94,8 +100,8 @@ func EnsureROMContiguous(f *elf.File, startAddr, endAddr uint64) error {
 	return fmt.Errorf("ROM memory not contiguous between %#x..%#x, missing data after %#x", startAddr, endAddr, contiguousUpTo)
 }
 
-// ReadAt reads from the binary sections representing read-only-memory (ROM) starting at address addr.
-func ReadAt(f *elf.File, b []byte, addr uint64) (int, error) {
+// ReadROMAt reads from the binary sections representing read-only-memory (ROM) starting at address addr.
+func ReadROMAt(f *elf.File, b []byte, addr uint64) (int, error) {
 	romStart, romEnd, err := ROMAddr(f)
 	if err != nil {
 		return 0, err
