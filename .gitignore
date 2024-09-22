@@ -21,6 +21,7 @@ vendor/
 # The picobin binary when running go build ./cmd/picobin
 picobin
 !cmd/picobin
+!boot/picobin
 !testdata/blink.elf
 # IDE
 .vscode/

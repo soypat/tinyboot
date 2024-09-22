@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/soypat/picobin/elfutil"
+	"github.com/soypat/picobin/build/elfutil"
 )
 
 func elfinfo(r io.ReaderAt, flags Flags) error {
@@ -54,14 +54,13 @@ func elfROM(f *elf.File, flags Flags) (ROM []byte, romAddr uint64, err error) {
 	if err != nil {
 		return nil, uromStart, err
 	}
-	romStart := int64(uromStart)
 	romSize := uromEnd - uromStart
 	if romSize > uint64(flags.readsize) {
 		fmt.Printf("ROM %d too large, limiting to %d\n", romSize, flags.readsize)
 		romSize = uint64(flags.readsize)
 	}
 	ROM = make([]byte, romSize)
-	flashEnd, err := elfutil.ReadAt(f, ROM[:], romStart)
+	flashEnd, err := elfutil.ReadAt(f, ROM[:], uromStart)
 	if err != nil {
 		return nil, 0, err
 	} else if flashEnd > int(flags.readsize) {

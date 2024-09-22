@@ -23,30 +23,37 @@ func ROMAddr(f *elf.File) (startAddr, endAddr uint64, err error) {
 	if len(f.Sections) == 0 || len(f.Progs) == 0 {
 		return 0, 0, errors.New("no sections and/or progs in ELF")
 	}
+
+	sectionStartAddr := ^uint64(0)
+	for _, section := range f.Sections {
+		if !SectionIsROM(section) {
+			continue
+		}
+		if section.Addr < sectionStartAddr {
+			sectionStartAddr = section.Addr // Sections define our lowest address. Progs may have bootloader memory.
+		}
+	}
+	progStartAddr := ^uint64(0)
+	for _, prog := range f.Progs {
+		if !ProgIsROM(prog) {
+			continue
+		}
+		endProg := prog.Paddr + prog.Memsz
+		if progStartAddr < prog.Paddr {
+			progStartAddr = prog.Paddr
+		}
+		if endProg > endAddr {
+			endAddr = endProg
+		}
+	}
 	// Find the lowest section address.
 	// The lowest program memory address is before the first section. This means
 	// that there is some extra data loaded at the start of the image that
 	// should be discarded.
 	// Example: ELF files where .text doesn't start at address 0 because
 	// there is a bootloader at the start.
-	startAddr = ^uint64(0)
-	for _, section := range f.Sections {
-		if !SectionIsROM(section) {
-			continue
-		}
-		if section.Addr < startAddr {
-			startAddr = section.Addr // Sections define our lowest address. Progs may have bootloader memory.
-		}
-	}
-	for _, prog := range f.Progs {
-		if !ProgIsROM(prog) {
-			continue
-		}
-		endProg := prog.Paddr + prog.Memsz
-		if endProg > endAddr {
-			endAddr = endProg
-		}
-	}
+	startAddr = sectionStartAddr
+
 	if startAddr == 0 && endAddr == 0 {
 		return 0, 0, errors.New("no ELF ROM memory found")
 	} else if startAddr == 0 {
@@ -88,40 +95,37 @@ func EnsureROMContiguous(f *elf.File, startAddr, endAddr uint64) error {
 }
 
 // ReadAt reads from the binary sections representing read-only-memory (ROM) starting at address addr.
-func ReadAt(f *elf.File, b []byte, addr int64) (int, error) {
-	if addr < 0 {
-		return 0, errors.New("negative address")
+func ReadAt(f *elf.File, b []byte, addr uint64) (int, error) {
+	romStart, romEnd, err := ROMAddr(f)
+	if err != nil {
+		return 0, err
 	}
+	end := addr + uint64(len(b))
+	if !aliases(addr, end, romStart, romEnd) {
+		return 0, errors.New("attempted to read completely out of ELF ROM bounds")
+	}
+
 	clear(b)
-	end := addr + int64(len(b))
 	maxReadIdx := 0
 	for _, prog := range f.Progs {
-		paddr := int64(prog.Paddr)
-		pend := paddr + int64(prog.Memsz)
+		paddr := prog.Paddr
+		pend := paddr + prog.Memsz
 		if !ProgIsROM(prog) || !aliases(addr, end, paddr, pend) {
 			continue
 		}
 
-		progOff := max(0, addr-paddr)
-		bOff := max(0, paddr-addr)
-		n, err := prog.ReadAt(b[bOff:], progOff)
+		progOff := dim(addr, paddr)
+		bOff := dim(paddr, addr)
+		if progOff > math.MaxInt64 {
+			return maxReadIdx, errors.New("ELF prog size overflows int64")
+		}
+		n, err := prog.ReadAt(b[bOff:], int64(progOff))
 		if err != nil && err != io.EOF {
 			return maxReadIdx, err
 		}
 		maxReadIdx = max(maxReadIdx, n+int(bOff))
 	}
 	return maxReadIdx, nil
-}
-
-func ReplaceSection(f *elf.File, sectionName string, newData []byte) error {
-	section := f.Section(sectionName)
-	if section == nil {
-		return fmt.Errorf("ELF section %q not found", sectionName)
-	} else if section.Size != section.FileSize {
-		return errors.New("cannot replace compressed section")
-	}
-
-	return nil
 }
 
 type integer interface {
@@ -137,6 +141,13 @@ func clear[E any](a []E) {
 	for i := range a {
 		a[i] = z
 	}
+}
+
+func dim[T integer](a, b T) T {
+	if a < b {
+		return 0
+	}
+	return a - b
 }
 
 func max[T integer](a, b T) T {
