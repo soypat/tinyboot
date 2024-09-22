@@ -60,6 +60,8 @@ func elfROM(f *elf.File, flags Flags) (ROM []byte, romAddr uint64, err error) {
 	flashEnd, err := elfutil.ReadAt(f, ROM[:], romStart)
 	if err != nil {
 		return nil, 0, err
+	} else if flashEnd > int(flags.readsize) {
+		return nil, 0, fmt.Errorf("flash size too large %d", flashEnd) // Should never happen...
 	}
 	return ROM[:flashEnd], uromStart, nil
 }

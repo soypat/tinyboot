@@ -65,7 +65,7 @@ func (block Block) String() string {
 	return fmt.Sprintf("Block %2d/%2d flags=%#x size=%d/%d addr=%#x", block.BlockNum+1, block.NumBlocks, block.Flags, block.PayloadSize, block.SizeOrFamilyID, block.TargetAddr)
 }
 
-// HeaderBytes returns the block's HeaderBytes.
+// HeaderBytes returns the block's first 32 bytes including magic numbers as an array.
 func (b Block) HeaderBytes() (hd [32]byte) {
 	binary.LittleEndian.PutUint32(hd[0:], MagicStart0)
 	binary.LittleEndian.PutUint32(hd[4:], MagicStart1)

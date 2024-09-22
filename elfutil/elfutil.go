@@ -3,6 +3,7 @@ package elfutil
 import (
 	"debug/elf"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -62,6 +63,17 @@ func ReadAt(f *elf.File, b []byte, addr int64) (int, error) {
 		maxReadIdx = max(maxReadIdx, n+int(bOff))
 	}
 	return maxReadIdx, nil
+}
+
+func ReplaceSection(f *elf.File, sectionName string, newData []byte) error {
+	section := f.Section(sectionName)
+	if section == nil {
+		return fmt.Errorf("ELF section %q not found", sectionName)
+	} else if section.Size != section.FileSize {
+		return errors.New("cannot replace compressed section")
+	}
+
+	return nil
 }
 
 func aliases(start0, end0, start1, end1 int64) bool {
