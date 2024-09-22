@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // SectionIsROM checks if the section is meant to exist on firmware.
@@ -33,10 +34,35 @@ func GetROMAddr(f *elf.File) (startAddr, endAddr uint64, err error) {
 			endAddr = endProg
 		}
 	}
-	if startAddr > endAddr {
+	if startAddr >= endAddr {
 		return 0, 0, errors.New("no ROM sections found")
+	} else if endAddr-startAddr > math.MaxInt {
+		return startAddr, endAddr, fmt.Errorf("ROM size overflows int %#x..%#x (%d)", startAddr, endAddr, endAddr-startAddr)
 	}
 	return startAddr, endAddr, nil
+}
+
+// EnsureROMContiguous checks ROM program memory is contiguously represented between startAddr and endAddr addresses and returns error if not contiguous.
+func EnsureROMContiguous(f *elf.File, startAddr, endAddr uint64) error {
+	// TODO(soypat): maybe use a more elegant, non-brute approach... but really this is more than good enough for non-adversarial input. O(n) time for sorted inputs. O(n^2) for adversarial input. ELF is typically more or less sorted...
+	contiguousUpTo := startAddr
+	for c := 0; c < len(f.Progs); c++ {
+		for _, prog := range f.Progs {
+			pstart := prog.Paddr
+			pend := pstart + prog.Memsz
+			if !ProgIsROM(prog) || !aliases(contiguousUpTo, contiguousUpTo+1, pstart, pend) {
+				continue
+			}
+			contiguousUpTo = pend
+			if contiguousUpTo >= endAddr {
+				return nil
+			}
+		}
+	}
+	if contiguousUpTo == startAddr {
+		return errors.New("start address lower than ROM")
+	}
+	return fmt.Errorf("ROM memory not contiguous between %#x..%#x, only up to %#x", startAddr, endAddr, contiguousUpTo)
 }
 
 // ReadAt reads from the binary sections representing read-only-memory (ROM) starting at address addr.
@@ -76,7 +102,11 @@ func ReplaceSection(f *elf.File, sectionName string, newData []byte) error {
 	return nil
 }
 
-func aliases(start0, end0, start1, end1 int64) bool {
+type integer interface {
+	~int | ~int64 | ~uint64
+}
+
+func aliases[T integer](start0, end0, start1, end1 T) bool {
 	return start0 < end1 && end0 > start1
 }
 
@@ -87,14 +117,14 @@ func clear[E any](a []E) {
 	}
 }
 
-func max[T ~int | ~int64](a, b T) T {
+func max[T integer](a, b T) T {
 	if a > b {
 		return a
 	}
 	return b
 }
 
-func min[T ~int | ~int64](a, b T) T {
+func min[T integer](a, b T) T {
 	if a < b {
 		return a
 	}

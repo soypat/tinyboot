@@ -50,6 +50,10 @@ func elfROM(f *elf.File, flags Flags) (ROM []byte, romAddr uint64, err error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	err = elfutil.EnsureROMContiguous(f, uromStart, uromEnd)
+	if err != nil {
+		return nil, uromStart, err
+	}
 	romStart := int64(uromStart)
 	romSize := uromEnd - uromStart
 	if romSize > uint64(flags.readsize) {
