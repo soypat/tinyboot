@@ -46,7 +46,7 @@ func elfdump(r io.ReaderAt, flags Flags) error {
 }
 
 func elfROM(f *elf.File, flags Flags) (ROM []byte, romAddr uint64, err error) {
-	uromStart, uromEnd, err := elfutil.GetROMAddr(f)
+	uromStart, uromEnd, err := elfutil.ROMAddr(f)
 	if err != nil {
 		return nil, 0, err
 	}

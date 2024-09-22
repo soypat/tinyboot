@@ -19,25 +19,44 @@ func ProgIsROM(prog *elf.Prog) bool {
 
 }
 
-func GetROMAddr(f *elf.File) (startAddr, endAddr uint64, err error) {
+func ROMAddr(f *elf.File) (startAddr, endAddr uint64, err error) {
+	if len(f.Sections) == 0 || len(f.Progs) == 0 {
+		return 0, 0, errors.New("no sections and/or progs in ELF")
+	}
 	// Find the lowest section address.
+	// The lowest program memory address is before the first section. This means
+	// that there is some extra data loaded at the start of the image that
+	// should be discarded.
+	// Example: ELF files where .text doesn't start at address 0 because
+	// there is a bootloader at the start.
 	startAddr = ^uint64(0)
+	for _, section := range f.Sections {
+		if !SectionIsROM(section) {
+			continue
+		}
+		if section.Addr < startAddr {
+			startAddr = section.Addr // Sections define our lowest address. Progs may have bootloader memory.
+		}
+	}
 	for _, prog := range f.Progs {
 		if !ProgIsROM(prog) {
 			continue
-		}
-		if prog.Paddr < startAddr {
-			startAddr = prog.Paddr
 		}
 		endProg := prog.Paddr + prog.Memsz
 		if endProg > endAddr {
 			endAddr = endProg
 		}
 	}
-	if startAddr >= endAddr {
-		return 0, 0, errors.New("no ROM sections found")
+	if startAddr == 0 && endAddr == 0 {
+		return 0, 0, errors.New("no ELF ROM memory found")
+	} else if startAddr == 0 {
+		return 0, 0, errors.New("no ELF ROM sections found")
+	} else if endAddr == 0 {
+		return 0, 0, errors.New("no ELF ROM prog memory found")
+	} else if startAddr >= endAddr {
+		return 0, 0, errors.New("inconsistent ELF ROM labelling between sections and prog")
 	} else if endAddr-startAddr > math.MaxInt {
-		return startAddr, endAddr, fmt.Errorf("ROM size overflows int %#x..%#x (%d)", startAddr, endAddr, endAddr-startAddr)
+		return startAddr, endAddr, fmt.Errorf("ELF ROM size overflows int %#x..%#x (%d)", startAddr, endAddr, endAddr-startAddr)
 	}
 	return startAddr, endAddr, nil
 }
@@ -53,6 +72,9 @@ func EnsureROMContiguous(f *elf.File, startAddr, endAddr uint64) error {
 			if !ProgIsROM(prog) || !aliases(contiguousUpTo, contiguousUpTo+1, pstart, pend) {
 				continue
 			}
+			if pstart != contiguousUpTo {
+				return fmt.Errorf("ROM memory not contiguous between %#x..%#x, found data overlap at %#x", startAddr, endAddr, contiguousUpTo)
+			}
 			contiguousUpTo = pend
 			if contiguousUpTo >= endAddr {
 				return nil
@@ -62,7 +84,7 @@ func EnsureROMContiguous(f *elf.File, startAddr, endAddr uint64) error {
 	if contiguousUpTo == startAddr {
 		return errors.New("start address lower than ROM")
 	}
-	return fmt.Errorf("ROM memory not contiguous between %#x..%#x, only up to %#x", startAddr, endAddr, contiguousUpTo)
+	return fmt.Errorf("ROM memory not contiguous between %#x..%#x, missing data after %#x", startAddr, endAddr, contiguousUpTo)
 }
 
 // ReadAt reads from the binary sections representing read-only-memory (ROM) starting at address addr.
