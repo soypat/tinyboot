@@ -147,10 +147,18 @@ func (imgdef ImageDef) String() string {
 		imgdef.ImageType().String(), imgdef.ExeSec().String(), imgdef.ExeCPU().String(), imgdef.ExeChip().String())
 }
 
-func rawMakeItem(head ItemType, szMod, szDivOrData, tpdata uint8, data []byte) Item {
+func rawMakeItem(itemtype ItemType, szMod, szDivOrData, tpdata uint8, data []byte) Item {
+	var szmask uint8
+	if itemtype == ItemTypeIgnored || itemtype == ItemTypeLast || len(data) > 255 {
+		szmask = maskByteSize2
+	}
 	sizeAndSpecial := uint16(szMod) | uint16(szDivOrData)<<8
 	item := Item{
-		Head: uint8(head), SizeAndSpecial: sizeAndSpecial, TypeData: tpdata, Data: data,
+		Head: uint8(itemtype) | szmask, SizeAndSpecial: sizeAndSpecial, TypeData: tpdata, Data: data,
+	}
+	err := item.Validate()
+	if err != nil {
+		panic(err.Error())
 	}
 	if item.Size() != len(data)+4 {
 		panic("bad rawMakeItem size data")
@@ -196,4 +204,8 @@ type LoadMapEntry struct {
 	StorageStartAbsOrRel uint32 // Storage start address relative to this word if not absolute, absolute storage start address if absolute.
 	RuntimeStartAbs      uint32 // Absolute runtime start address.
 	SizeOrEndAbs         uint32 // Size in bytes if not absolute, storage end address if absolute.
+}
+
+func makeIgnoredItem() Item {
+	return rawMakeItem(ItemTypeIgnored, 1, 0, 0, nil)
 }

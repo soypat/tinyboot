@@ -15,7 +15,7 @@ const (
 	BlockMarkerStart = 0xffffded3
 	BlockMarkerEnd   = 0xab123579
 	minBlockSize     = 4 + 4 + 4 + 4 // Header + last_item + Link + Footer
-	maskByteSize2    = 1
+	maskByteSize2    = 1 << 7
 )
 
 var (
@@ -43,7 +43,7 @@ func (b Block) Validate() error {
 	expectSz := minBlockSize
 	for i := range b.Items {
 		if b.Items[i].ItemType() == ItemTypeLast {
-			return errors.New("block contains last item type")
+			return errors.New("picobin.Block cannot contain last item type")
 		}
 		err := b.Items[i].Validate()
 		if err != nil {
@@ -167,6 +167,52 @@ func DecodeNextItem(blockText []byte) (Item, int, error) {
 	return item, size, nil
 }
 
+// AppendBlockFromItems creates a new [Block] and appends its binary representation to dst and returns the result
+// as well as the newly created block. It's link points to the next point in memory after appending data and padding with zeros.
+// Concatenating various calls of AppendBlockFromItems to the same buffer will concatenate the blocks correctly.
+func AppendBlockFromItems(dst []byte, blockItems []Item, data []byte, padZeros int) ([]byte, Block, error) {
+	if padZeros < 0 {
+		return nil, Block{}, errors.New("negative padZeros")
+	}
+	itemsSize := 0
+	for i := range blockItems {
+		itemsSize += blockItems[i].Size()
+	}
+	blk := Block{
+		Items: blockItems,
+		Link:  itemsSize + minBlockSize + len(data) + padZeros,
+	}
+	err := blk.Validate()
+	if err != nil {
+		return dst, Block{}, err
+	}
+	dst = blk.AppendTo(dst)
+	dst = append(dst, data...)
+	if padZeros != 0 {
+		dst = grow(dst, padZeros)
+		dst = dst[:len(dst)+padZeros]
+	}
+	return dst, blk, nil
+}
+
+var lastBlockItemList = []Item{makeIgnoredItem()}
+
+// AppendFinalBlock appends a block with Ignore item and a link to the first block.
+func AppendFinalBlock(dst []byte, link int) ([]byte, Block, error) {
+	if link > -minBlockSize {
+		return nil, Block{}, errors.New("link should point to first block and be negative")
+	}
+	blk := Block{
+		Items: lastBlockItemList,
+		Link:  link,
+	}
+	err := blk.Validate()
+	if err != nil {
+		return nil, Block{}, err
+	}
+	return blk.AppendTo(dst), blk, nil
+}
+
 // AppendTo appends block to dst without checking data. Call [Block.Validate] before
 // AppendTo to ensure data being appended is sane.
 func (b Block) AppendTo(dst []byte) []byte {
@@ -210,4 +256,15 @@ func b2u8(b bool) uint8 {
 		return 1
 	}
 	return 0
+}
+
+// grow copied from slices package.
+func grow[S ~[]E, E any](s S, n int) S {
+	if n < 0 {
+		panic("cannot be negative")
+	}
+	if n -= cap(s) - len(s); n > 0 {
+		s = append(s[:cap(s)], make([]E, n)...)[:len(s)]
+	}
+	return s
 }
