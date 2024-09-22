@@ -11,3 +11,7 @@ How to install package with newer versions of Go (+1.16):
 go mod download github.com/soypat/tinyboot@latest
 ```
 
+## Package layout
+There are two main top level packages:
+- [`boot`](./boot): Concerns storage formats for booting a computer such as MBT, GPT and Raspberry Pi's picobin format.
+- [`build`](./build): Concerns manipulation of computer program formats such as ELF and UF2.
