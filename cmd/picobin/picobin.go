@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/soypat/picobin/boot/picobin"
+	"github.com/soypat/tinyboot/boot/picobin"
 )
 
 const (
