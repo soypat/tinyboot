@@ -2,12 +2,9 @@ package main
 
 import (
 	"debug/elf"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 
-	"github.com/github.com/soypat/picobin"
 	"github.com/github.com/soypat/picobin/elfutil"
 )
 
@@ -24,12 +21,16 @@ func elfinfo(r io.ReaderAt, flags Flags) error {
 		totalSize += int(sect.Size)
 	}
 	fmt.Printf("total program memory=%d\n", totalSize)
-
-	blocks, start, err := elfBlocks(f, flags)
+	ROM, romstart, err := elfROM(f, flags)
 	if err != nil {
 		return err
 	}
-	return blockInfo(blocks, start, flags)
+	blocks, block0off, err := romBlocks(ROM, romstart)
+	if err != nil {
+		return err
+	}
+	block0Addr := romstart + uint64(block0off)
+	return blockInfo(blocks, block0Addr, flags)
 }
 
 func elfdump(r io.ReaderAt, flags Flags) error {
@@ -37,36 +38,14 @@ func elfdump(r io.ReaderAt, flags Flags) error {
 	if err != nil {
 		return err
 	}
-	blocks, start, err := elfBlocks(f, flags)
+	ROM, romstart, err := elfROM(f, flags)
 	if err != nil {
 		return err
 	}
-
-	addr := start
-	for i, block := range blocks {
-		if flags.block >= 0 && i != flags.block || len(block.Items) >= 1 && block.Items[0].ItemType() == picobin.ItemTypeIgnored {
-			addr += uint64(block.Link)
-			continue
-		}
-		blockSize := block.Size()
-		dataSize := block.Link - blockSize
-		if dataSize < 0 {
-			break // Last block.
-		}
-		data := make([]byte, dataSize)
-		n, err := elfutil.ReadAt(f, data, int64(addr)+int64(blockSize))
-		if err != nil {
-			return err
-		} else if n == 0 {
-			return errors.New("unable to extract data after block")
-		}
-		fmt.Printf("BLOCK%d @ Addr=%#x dump:\n%s", i, addr, hex.Dump(data))
-		addr += uint64(block.Link)
-	}
-	return nil
+	return romDump(ROM, romstart, flags)
 }
 
-func elfBlocks(f *elf.File, flags Flags) ([]picobin.Block, uint64, error) {
+func elfROM(f *elf.File, flags Flags) (ROM []byte, romAddr uint64, err error) {
 	uromStart, uromEnd, err := elfutil.GetROMAddr(f)
 	if err != nil {
 		return nil, 0, err
@@ -77,24 +56,19 @@ func elfBlocks(f *elf.File, flags Flags) ([]picobin.Block, uint64, error) {
 		fmt.Printf("ROM %d too large, limiting to %d\n", romSize, flags.readsize)
 		romSize = uint64(flags.readsize)
 	}
-	ROM := make([]byte, romSize)
+	ROM = make([]byte, romSize)
 	flashEnd, err := elfutil.ReadAt(f, ROM[:], romStart)
 	if err != nil {
 		return nil, 0, err
 	}
-	blocks, block0Start, err := romBlocks(ROM[:flashEnd], uromStart)
-	if err != nil {
-		return blocks, 0, err
-	}
-	startAbs := uint64(block0Start) + uromStart
-	return blocks, startAbs, nil
+	return ROM[:flashEnd], uromStart, nil
 }
 
 // helper function that discards sections and program memory of no interest to us.
 func newElfFile(r io.ReaderAt, flags Flags) (*elf.File, error) {
 	f, err := elf.NewFile(r)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("attempt to read ELF format: %w", err)
 	}
 
 	var sections []*elf.Section

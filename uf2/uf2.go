@@ -96,20 +96,20 @@ func (b *Block) Validate() error {
 	return nil
 }
 
-func DecodeAppendBlocks(dst []Block, r io.Reader, buf []byte) ([]Block, int, error) {
-	if len(buf) < BlockSize {
+func DecodeAppendBlocks(dst []Block, r io.Reader, scratchBuf []byte) ([]Block, int, error) {
+	if len(scratchBuf) < BlockSize {
 		return dst, 0, errors.New("decode buffer to small to fit a block")
 	}
 	// Round size of buffer to block size.
-	buf = buf[:len(buf)-len(buf)%BlockSize]
+	scratchBuf = scratchBuf[:len(scratchBuf)-len(scratchBuf)%BlockSize]
 	ntot := 0
 	numBlocks := 0
 	for {
-		n, err := io.ReadFull(r, buf)
+		n, err := io.ReadFull(r, scratchBuf)
 		ntot += n
 		i := 0
 		for i+BlockSize <= n {
-			block, err := DecodeBlock(buf[i:])
+			block, err := DecodeBlock(scratchBuf[i:])
 			if err != nil {
 				return dst, ntot, err
 			}

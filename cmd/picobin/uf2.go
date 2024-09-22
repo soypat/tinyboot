@@ -35,30 +35,11 @@ func uf2info(r io.ReaderAt, flags Flags) error {
 		}
 		fmt.Fprintf(os.Stdout, "\t%s sha256=%x\n", block.String(), sum)
 	}
-
-	rd, err := uf2.NewBlocksReaderAt(uf2blocks)
+	ROM, romstart, err := romFromUF2Blocks(uf2blocks, flags)
 	if err != nil {
 		return err
 	}
-	start, end := rd.Addrs()
-	if end > uint32(flags.flashend) {
-		end = uint32(flags.flashend)
-	}
-	romsize := int(end) - int(start)
-	if romsize < 0 {
-		return fmt.Errorf("invalid addresses or bad flash address flag start=%#x, flashlim=%#x", start, flags.flashend)
-	} else if romsize > int(flags.readsize) {
-		fmt.Println("limiting ROM read")
-		romsize = int(flags.readsize)
-	}
-	ROM := make([]byte, romsize)
-	n, err := rd.ReadAt(ROM, int64(start))
-	if err != nil {
-		return err
-	} else if n != len(ROM) {
-		fmt.Println("unexpected short read:", n, "of", len(ROM))
-	}
-	blocks, block0start, err := romBlocks(ROM, uint64(start))
+	blocks, block0start, err := romBlocks(ROM, romstart)
 	if err != nil {
 		return err
 	}
@@ -87,9 +68,9 @@ func uf2conv(r io.ReaderAt, flags Flags) error {
 	} else if n != len(ROM) {
 		return fmt.Errorf("failed to read ELF ROM completely (%d/%d)", n, len(ROM))
 	}
-	fmt := uf2.Formatter{ChunkSize: 256, FamilyID: uint32(flags.familyID), Flags: uf2.FlagFamilyIDPresent}
+	formatter := uf2.Formatter{ChunkSize: 256, FamilyID: uint32(flags.familyID), Flags: uf2.FlagFamilyIDPresent}
 	uf2prog := make([]byte, 0, size)
-	uf2prog, _, err = fmt.AppendTo(uf2prog, ROM, uint32(start))
+	uf2prog, _, err = formatter.AppendTo(uf2prog, ROM, uint32(start))
 	if err != nil {
 		return err
 	}
@@ -97,7 +78,35 @@ func uf2conv(r io.ReaderAt, flags Flags) error {
 	if dotIdx < 0 {
 		dotIdx = len(flags.argSourcename)
 	}
-	return os.WriteFile(flags.argSourcename[:dotIdx]+".uf2", uf2prog, 0777)
+	filename := flags.argSourcename[:dotIdx] + ".uf2"
+	fmt.Println("writing file", filename)
+	return os.WriteFile(filename, uf2prog, 0777)
+}
+
+func romFromUF2Blocks(uf2blocks []uf2.Block, flags Flags) (ROM []byte, romAddr uint64, err error) {
+	rd, err := uf2.NewBlocksReaderAt(uf2blocks)
+	if err != nil {
+		return nil, 0, err
+	}
+	start, end := rd.Addrs()
+	if end > uint32(flags.flashend) {
+		end = uint32(flags.flashend)
+	}
+	romsize := int(end) - int(start)
+	if romsize < 0 {
+		return nil, 0, fmt.Errorf("invalid addresses or bad flash address flag start=%#x, flashlim=%#x", start, flags.flashend)
+	} else if romsize > int(flags.readsize) {
+		fmt.Println("limiting ROM read")
+		romsize = int(flags.readsize)
+	}
+	ROM = make([]byte, romsize)
+	n, err := rd.ReadAt(ROM, int64(start))
+	if err != nil {
+		return nil, 0, err
+	} else if n != len(ROM) {
+		fmt.Println("unexpected short read:", n, "of", len(ROM))
+	}
+	return ROM, uint64(start), nil
 }
 
 func uf2file(r io.ReaderAt, _ Flags) ([]uf2.Block, error) {

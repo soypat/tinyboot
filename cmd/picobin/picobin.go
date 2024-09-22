@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -123,12 +124,12 @@ func romBlocks(ROM []byte, romStartAddr uint64) (blocks []picobin.Block, block0O
 	return blocks, block0Off, nil
 }
 
-func blockInfo(blocks []picobin.Block, block0Start uint64, flags Flags) (err error) {
+func blockInfo(blocks []picobin.Block, block0StartAddr uint64, flags Flags) (err error) {
 	if len(blocks) == 0 {
 		return errors.New("no blocks found")
 	}
 	fmt.Println("ROM Block info:")
-	addr := block0Start
+	addr := block0StartAddr
 	for i, block := range blocks {
 		if flags.block >= 0 && i != flags.block {
 			addr += uint64(block.Link)
@@ -146,6 +147,28 @@ func blockInfo(blocks []picobin.Block, block0Start uint64, flags Flags) (err err
 		if err != nil {
 			fmt.Printf("BLOCK%d failed to validate:\n\t%s\n", i, err.Error())
 		}
+	}
+	return nil
+}
+
+func romDump(ROM []byte, startAddr uint64, flags Flags) (err error) {
+	blocks, block0Start, err := romBlocks(ROM, startAddr)
+	if err != nil {
+		return err
+	}
+	off := block0Start
+	for i, block := range blocks {
+		if flags.block >= 0 && i != flags.block || len(block.Items) >= 1 && block.Items[0].ItemType() == picobin.ItemTypeIgnored {
+			off += int(block.Link)
+			continue
+		}
+		nextOff := off + block.Link
+		if nextOff == block0Start {
+			break // Last block.
+		}
+		addr := startAddr + uint64(off)
+		fmt.Printf("BLOCK%d @ Addr=%#x dump:\n%s", i, addr, hex.Dump(ROM[off:nextOff]))
+		off += int(block.Link)
 	}
 	return nil
 }

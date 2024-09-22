@@ -58,7 +58,7 @@ func (b Block) Validate() error {
 }
 
 func (b Block) String() string {
-	return fmt.Sprintf("%s link=%d", b.Items, b.Link)
+	return fmt.Sprintf("%s link=%d sz=%d", b.Items, b.Link, b.Size())
 }
 
 // Size returns the size of the block in bytes, from start of header to end of footer.
