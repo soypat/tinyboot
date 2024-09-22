@@ -43,7 +43,7 @@ func uf2info(r io.ReaderAt, flags Flags) error {
 	if err != nil {
 		return err
 	}
-	return blockInfo(blocks, uint64(block0start), flags)
+	return blockInfo(blocks, romstart+uint64(block0start), flags)
 }
 
 func uf2conv(r io.ReaderAt, flags Flags) error {

@@ -10,10 +10,12 @@ import (
 )
 
 var (
-	errSmallBlock = errors.New("buffer too small to contain block")
-	errMagic0     = errors.New("first word is not magic0 word \"UF2\\n\"")
-	errMagic1     = errors.New("second word is not magic1 word")
-	errMagicEnd   = errors.New("last word is not magic end word")
+	errSmallBlock     = errors.New("buffer too small to contain block")
+	errPayload        = errors.New("payload size exceeds max UF2 block size")
+	errBlockNumbering = errors.New("block number larger than number of blocks")
+	errMagic0         = errors.New("first word is not magic0 word \"UF2\\n\"")
+	errMagic1         = errors.New("second word is not magic1 word")
+	errMagicEnd       = errors.New("last word is not magic end word")
 )
 
 const (
@@ -89,9 +91,11 @@ func (b *Block) Data() ([]byte, error) {
 func (b *Block) Validate() error {
 	sz := b.PayloadSize
 	if sz > BlockMaxData {
-		return errors.New("payload size exeeds permissible maximum")
+		return errPayload
 	} else if sz == 0 {
 		return errors.New("zero payload size")
+	} else if b.BlockNum >= b.NumBlocks {
+		return errBlockNumbering
 	}
 	return nil
 }
@@ -128,11 +132,15 @@ func DecodeAppendBlocks(dst []Block, r io.Reader, scratchBuf []byte) ([]Block, i
 
 // DecodeBlock decodes a 512 byte block from the argument buffer. Buffer must be at least 512 bytes long.
 func DecodeBlock(text []byte) (Block, error) {
-	err := ValidateBlock(text)
+	err := validateMagic(text)
 	if err != nil {
 		return Block{}, err
 	}
 	block := MustDecodeBlock(text)
+	err = block.Validate()
+	if err != nil {
+		return Block{}, err
+	}
 	return block, nil
 }
 
@@ -149,7 +157,7 @@ func MustDecodeBlock(text []byte) (block Block) {
 	return block
 }
 
-func ValidateBlock(text []byte) error {
+func validateMagic(text []byte) error {
 	if len(text) < 512 {
 		return errSmallBlock
 	}
