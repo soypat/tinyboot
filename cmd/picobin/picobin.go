@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/github.com/soypat/picobin"
+	"github.com/soypat/picobin"
 )
 
 const (

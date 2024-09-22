@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/github.com/soypat/picobin/elfutil"
+	"github.com/soypat/picobin/elfutil"
 )
 
 func elfinfo(r io.ReaderAt, flags Flags) error {

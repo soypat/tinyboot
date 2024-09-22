@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/github.com/soypat/picobin/uf2"
+	"github.com/soypat/picobin/uf2"
 )
 
 func uf2info(r io.ReaderAt, flags Flags) error {
