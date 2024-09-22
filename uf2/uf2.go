@@ -10,12 +10,14 @@ import (
 )
 
 var (
-	errSmallBlock     = errors.New("buffer too small to contain block")
-	errPayload        = errors.New("payload size exceeds max UF2 block size")
-	errBlockNumbering = errors.New("block number larger than number of blocks")
-	errMagic0         = errors.New("first word is not magic0 word \"UF2\\n\"")
-	errMagic1         = errors.New("second word is not magic1 word")
-	errMagicEnd       = errors.New("last word is not magic end word")
+	errSmallBlock        = errors.New("buffer too small to contain block")
+	errPayload           = errors.New("payload size exceeds max UF2 block size")
+	errBlockNumbering    = errors.New("block number larger than number of blocks")
+	errMagic0            = errors.New("first word is not magic0 word \"UF2\\n\"")
+	errMagic1            = errors.New("second word is not magic1 word")
+	errMagicEnd          = errors.New("last word is not magic end word")
+	errFamilyIDOverflow  = errors.New("data length overflows uint32, use familyID to omit size field")
+	errNumBlocksOverflow = errors.New("too much data:number of UF2 blocks overflows uint32")
 )
 
 const (
@@ -27,7 +29,8 @@ const (
 	defaultDataSize = 256
 )
 
-// Block is the structure used for each UF2 code block sent to device. It is 512 bytes in size. Size of header is 32 bytes.
+// Block is the structure used for each UF2 code block sent to device. It is 512 bytes in size including magic words.
+// Size of header is 32 bytes. This type does not include magic words as those are part of I/O validation in [DecodeBlock].
 type Block struct {
 	Flags          Flags
 	TargetAddr     uint32 // Address in flash where the data should be written.
@@ -204,7 +207,7 @@ func (f *Formatter) startBlock(datalen int, targetAddr uint32) (Block, error) {
 		familyOrSize = f.FamilyID
 	} else {
 		if datalen > math.MaxUint32 {
-			return Block{}, errors.New("data length overflows uint32, use familyID to omit size field")
+			return Block{}, errFamilyIDOverflow
 		}
 		familyOrSize = uint32(datalen)
 	}
@@ -212,8 +215,9 @@ func (f *Formatter) startBlock(datalen int, targetAddr uint32) (Block, error) {
 	excedent := datalen % int(f.ChunkSize)
 	if excedent != 0 {
 		numBlocks++
-	} else if numBlocks > math.MaxUint32 {
-		return Block{}, errors.New("number of UF2 blocks overflows uint32")
+	}
+	if numBlocks > math.MaxUint32 {
+		return Block{}, errNumBlocksOverflow
 	}
 	block := Block{
 		Flags:          f.Flags,
@@ -267,6 +271,7 @@ func (f *Formatter) forEachBlock(data []byte, targetAddr uint32, fn func(Block) 
 	return nil
 }
 
+// NewBlocksReaderAt
 func NewBlocksReaderAt(blocks []Block) (*BlocksReaderAt, error) {
 	obj := BlocksReaderAt{
 		blks:    blocks,
