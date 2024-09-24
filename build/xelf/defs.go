@@ -1,6 +1,16 @@
 package xelf
 
-//go:generate stringer -linecomment -output=stringers.go -type=Class,Data,OSABI,Type,Machine,SectionIndex,ProgType,sectionFlag,progFlag,NType,SymBind,RX86_64,RAARCH64,RAlpha,RARM,R386,RMIPS,RLoongArch,RPPC,RPPC64,RRISCV
+// Version is found in Header.Ident[EI_VERSION] and Header.Version.
+//
+//go:generate stringer -linecomment -output=stringers.go -type=Class,Data,OSABI,Type,Machine,SectionIndex,ProgType,sectionFlag,progFlag,NType,SymVis,SymBind,SymType,RX86_64,RAARCH64,RAlpha,RARM,R386,RMIPS,RLoongArch,RPPC,RPPC64,RRISCV
+
+// Version is found in [Header].
+type Version byte
+
+const (
+	VersionNone    Version = 0 // None
+	VersionCurrent Version = 1 // Current
+)
 
 type Class uint8
 
@@ -350,7 +360,7 @@ const (
 	ProgTypePHDR    ProgType = 6 // Location of program header itself
 	ProgTypeTLS     ProgType = 7 // Thread local storage segment
 
-	ProgTypeLoOS ProgType = 0x60000000 // First OS-specific
+	ProgTypeOSLo ProgType = 0x60000000 // First OS-specific
 
 	ProgTypeGNU_EH_Frame ProgType = 0x6474e550 // Frame unwind information
 	ProgTypeGNU_Stack    ProgType = 0x6474e551 // Stack flags
@@ -369,9 +379,9 @@ const (
 	ProgTypeSUNW_EH_Frame ProgType = 0x6474e550 // Frame unwind information
 	ProgTypeSUNWStack     ProgType = 0x6ffffffb // Stack segment
 
-	ProgTypeHiOS ProgType = 0x6fffffff // Last OS-specific
+	ProgTypeOSHi ProgType = 0x6fffffff // Last OS-specific
 
-	ProgTypeLoProc ProgType = 0x70000000 // First processor-specific type
+	ProgTypeProcLo ProgType = 0x70000000 // First processor-specific type
 
 	ProgTypeARM_ARCHExt ProgType = 0x70000000 // Architecture compatibility
 	ProgTypeARM_EXIdx   ProgType = 0x70000001 // Exception unwind tables
@@ -386,7 +396,7 @@ const (
 
 	ProgTypeS390_PGSTE ProgType = 0x70000000 // 4k page table size
 
-	ProgTypeHiProc ProgType = 0x7fffffff // Last processor-specific type
+	ProgTypeProcHi ProgType = 0x7fffffff // Last processor-specific type
 )
 
 // Prog.Flag
@@ -655,13 +665,35 @@ const (
 type SymBind int
 
 const (
-	STB_LOCAL  SymBind = 0  // Local symbol
-	STB_GLOBAL SymBind = 1  // Global symbol
-	STB_WEAK   SymBind = 2  // like global - lower precedence
-	STB_LOOS   SymBind = 10 // Reserved range for operating system
-	STB_HIOS   SymBind = 12 // specific semantics
-	STB_LOPROC SymBind = 13 // reserved range for processor
-	STB_HIPROC SymBind = 15 // specific semantics
+	SymBindLocal  SymBind = 0  // Local symbol
+	SymBindGlobal SymBind = 1  // Global symbol
+	SymBindWeak   SymBind = 2  // like global - lower precedence
+	SymBindOSLo   SymBind = 10 // Reserved range for operating system
+	SymBindOSHi   SymBind = 12 // specific semantics
+	SymBindProcLo SymBind = 13 // reserved range for processor
+	SymBindProcHi SymBind = 15 // specific semantics
+)
+
+/* Symbol type - ELFNN_ST_TYPE - st_info */
+type SymType int
+
+const (
+	SymTypeNoType  SymType = 0  // Unspecified type
+	SymTypeObject  SymType = 1  // Data object
+	SymTypeFunc    SymType = 2  // Function
+	SymTypeSection SymType = 3  // Section
+	SymTypeFile    SymType = 4  // Source file
+	SymTypeCommon  SymType = 5  // Uninitialized common block
+	SymTypeTLS     SymType = 6  // TLS object
+	SymTypeOSLo    SymType = 10 // rsv:OSLo
+	SymTypeOSHi    SymType = 12 // rsv:OSHi
+	SymTypeProcLo  SymType = 13 // rsv:ProcLo
+	SymTypeProcHi  SymType = 15 // rsv:ProcHi
+
+	// Non-standard symbol types
+	SymTypeRelc      SymType = 8  // Complex relocation expression
+	SymTypeSRelc     SymType = 9  // Signed complex relocation expression
+	SymTypeGNU_IFunc SymType = 10 // Indirect code object
 )
 
 // Symbol visibility - ELFNN_ST_VISIBILITY - st_other
