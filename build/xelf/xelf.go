@@ -1,6 +1,7 @@
 package xelf
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 
 // Indexes into the Header.Ident array.
 const (
+	fileBufSize = 512
+
 	magicLE       uint32 = 0x7f | 'E'<<8 | 'L'<<16 | 'F'<<24
 	offClass             = 4  // Class of machine.
 	offData              = 5  // Data format.
@@ -100,9 +103,9 @@ var (
 
 type File struct {
 	hdr      Header
-	progs    []Prog
-	sections []Section
-	buf      [512]byte
+	progs    []prog
+	sections []section
+	buf      [fileBufSize]byte
 }
 
 type Header struct {
@@ -135,6 +138,49 @@ func (f *File) Read(r io.ReaderAt) error {
 	if err != nil {
 		return err
 	}
+	// If the number of sections is greater than or equal to SHN_LORESERVE
+	// (0xff00), shnum has the value zero and the actual number of section
+	// header table entries is contained in the sh_size field of the section
+	// header at index 0.
+	bo := header.ByteOrder()
+	if header.Shoff > 0 && header.Shnum == 0 {
+		println("special initial section")
+		n, err := r.ReadAt(buf[:sectionHeaderSize64], int64(header.Shoff))
+		if err != nil {
+			return makeFormatErr(header.Shoff, err.Error(), n)
+		}
+		sh, _, err := DecodeSectionHeader(buf[:n], header.Class, bo)
+		if err != nil {
+			return makeFormatErr(header.Shoff, err.Error(), sh)
+		}
+		err = sh.Validate()
+		if err != nil {
+			return makeFormatErr(header.Shoff, err.Error(), sh)
+		}
+		header.Shnum = uint16(sh.FileSize)
+
+		if sh.Type != SecTypeNull {
+			return makeFormatErr(header.Shoff, "invalid type of the initial section", sh.Type)
+		} else if SectionIndex(header.Shnum) < SecIdxReserveLo {
+			return makeFormatErr(header.Shoff, "invalid shnum contained in sh_size", header.Shnum)
+		}
+		// If the section name string table section index is greater than or
+		// equal to SHN_LORESERVE (0xff00), this member has the value
+		// SHN_XINDEX (0xffff) and the actual index of the section name
+		// string table section is contained in the sh_link field of the
+		// section header at index 0.
+		if int(header.Shstrndx) == int(SecIdxXindex) {
+			if sh.Link > math.MaxUint16 {
+				return makeFormatErr(header.Shoff, "initial section link overflows uint16 as shstrndx", sh.Link)
+			}
+			header.Shstrndx = uint16(sh.Link)
+			if header.Shstrndx < uint16(SecIdxReserveLo) {
+				return makeFormatErr(header.Shoff, "invalid shstrndx contained in sh_link", header.Shstrndx)
+			} else if header.Shstrndx >= header.Shnum {
+				return makeFormatErr(header.Shoff, "shstrndx from sh_link in initial section greater than shnum", header.Shstrndx)
+			}
+		}
+	}
 	err = header.Validate()
 	if err != nil {
 		return err
@@ -142,10 +188,9 @@ func (f *File) Read(r io.ReaderAt) error {
 
 	phentsize := int64(header.Phentsize)
 	progHeaderOff := int64(header.Phoff)
-	bo := header.ByteOrder()
-	progs := make([]Prog, header.Phnum)
+
+	progs := make([]prog, header.Phnum)
 	for i := int64(0); i < int64(header.Phnum); i++ {
-		var p Prog
 		progOff := i * phentsize
 		fileOff := progHeaderOff + progOff
 		n, err := r.ReadAt(buf[:progHeaderSize64], fileOff)
@@ -160,58 +205,20 @@ func (f *File) Read(r io.ReaderAt) error {
 		if err != nil {
 			return makeFormatErr(uint64(fileOff), err.Error(), ph)
 		}
-		progs[i] = Prog{
-			hdr: ph,
-			r:   *io.NewSectionReader(r, int64(ph.Off), int64(p.hdr.Filesz)),
+		progs[i] = prog{
+			ProgHeader: ph,
+			r:          *io.NewSectionReader(r, int64(ph.Off), int64(ph.Filesz)),
 		}
 	}
 
-	// If the number of sections is greater than or equal to SHN_LORESERVE
-	// (0xff00), shnum has the value zero and the actual number of section
-	// header table entries is contained in the sh_size field of the section
-	// header at index 0.
-	shnum := int(header.Shnum)
-	shstrndx := int(header.Shstrndx)
-	if header.Shoff > 0 && header.Shnum == 0 {
-		n, err := r.ReadAt(buf[:sectionHeaderSize64], int64(header.Shoff))
-		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), n)
-		}
-		sh, _, err := DecodeSectionHeader(buf[:n], header.Class, bo)
-		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), sh)
-		}
-		err = sh.Validate()
-		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), sh)
-		}
-		shnum = int(sh.FileSize)
-
-		if sh.Type != SecTypeNull {
-			return makeFormatErr(header.Shoff, "invalid type of the initial section", sh.Type)
-		} else if shnum < int(SecIdxReserveLo) {
-			return makeFormatErr(header.Shoff, "invalid shnum contained in sh_size", shnum)
-		}
-		// If the section name string table section index is greater than or
-		// equal to SHN_LORESERVE (0xff00), this member has the value
-		// SHN_XINDEX (0xffff) and the actual index of the section name
-		// string table section is contained in the sh_link field of the
-		// section header at index 0.
-		if int(header.Shstrndx) == int(SecIdxXindex) {
-			shstrndx = int(sh.Link)
-			if shstrndx < int(SecIdxReserveLo) {
-				return makeFormatErr(header.Shoff, "invalid shstrndx contained in sh_link", shstrndx)
-			}
-		}
-	}
-	c := sliceCap[Section](uint64(shnum))
+	c := sliceCap[section](uint64(header.Shnum))
 	if c < 0 {
-		return makeFormatErr(0, "too many sections", shnum)
+		return makeFormatErr(0, "too many sections", header.Shnum)
 	}
-	sections := make([]Section, c)
+	sections := make([]section, c)
 	shentsize := int64(header.Shentsize)
-	sectBase := int64(shnum) * shentsize
-	for i := int64(0); i < int64(shnum); i++ {
+	sectBase := int64(header.Shnum) * shentsize
+	for i := int64(0); i < int64(header.Shnum); i++ {
 		sectOff := i * int64(header.Shentsize)
 		fileOff := sectBase + sectOff
 		n, err := r.ReadAt(buf[:sectionHeaderSize64], fileOff)
@@ -226,9 +233,9 @@ func (f *File) Read(r io.ReaderAt) error {
 		if err != nil {
 			return makeFormatErr(uint64(fileOff), err.Error(), err)
 		}
-		sections[i] = Section{
-			hdr: sh,
-			sr:  *io.NewSectionReader(r, int64(sh.Offset), int64(sh.FileSize)),
+		sections[i] = section{
+			SectionHeader: sh,
+			sr:            *io.NewSectionReader(r, int64(sh.Offset), int64(sh.FileSize)),
 		}
 	}
 	*f = File{
@@ -238,10 +245,6 @@ func (f *File) Read(r io.ReaderAt) error {
 	}
 	return nil
 }
-
-// func (f *File) SectionName(sectionIdx int) string {
-
-// }
 
 func (h *Header) ByteOrder() (bo binary.ByteOrder) {
 	switch h.Data {
@@ -401,12 +404,15 @@ func (ph *ProgHeader) Validate() (err error) {
 	return err
 }
 
-type Prog struct {
-	hdr ProgHeader
-	r   io.SectionReader
+type prog struct {
+	ProgHeader
+	r io.SectionReader
 }
 
 func makeFormatErr(off uint64, msg string, val any) error {
+	if str, ok := val.(fmt.Stringer); ok {
+		val = str.String()
+	}
 	return fmt.Errorf("off=%d %s: %v", off, msg, val)
 }
 
@@ -480,7 +486,78 @@ func (sh *SectionHeader) Validate() (err error) {
 	return err
 }
 
-type Section struct {
-	hdr SectionHeader
-	sr  io.SectionReader
+type section struct {
+	SectionHeader
+	sr io.SectionReader
+}
+
+// FileSection is the handle to a file's section.
+type FileSection struct {
+	f      *File
+	sindex int
+}
+
+func (fs *FileSection) ptr() *section {
+	return &fs.f.sections[fs.sindex]
+}
+
+func (fs *FileSection) Name() (string, error) {
+	strndx := int(fs.f.hdr.Shstrndx)
+	if strndx == 0 {
+		return "", nil // No Str table in ELF.
+	}
+
+	shstr, err := fs.f.Section(strndx)
+	if err != nil {
+		return "", err
+	}
+	s := shstr.ptr()
+	if s.Type != SecTypeStrTab {
+		return "", makeFormatErr(s.Offset, "strndx points to a non-stringtable section type", s.Type)
+	}
+	str, err := getString(shstr, int(fs.ptr().Name))
+	if err != nil {
+		return str, err
+	}
+	return str, nil
+}
+
+func (f *File) Section(sectionIdx int) (FileSection, error) {
+	if sectionIdx >= len(f.sections) || sectionIdx < 0 {
+		return FileSection{}, errors.New("OOB/negative section index")
+	}
+	return FileSection{
+		f:      f,
+		sindex: sectionIdx,
+	}, nil
+}
+
+// getString extracts a string from an ELF string table.
+func getString(strSec FileSection, nameStart int) (string, error) {
+	if nameStart < 0 || int64(nameStart) >= strSec.Size() {
+		return "", errors.New("bad section header name value")
+	}
+	secData, _ := strSec.readAt(fileBufSize, int64(nameStart))
+	strEnd := bytes.IndexByte(secData, 0)
+	if strEnd < 0 {
+		return "", errors.New("name too long or bad data")
+	}
+	return string(secData[:strEnd]), nil
+}
+
+func (fs *FileSection) Size() int64 {
+	return int64(fs.ptr().FileSize) // For now returns uncompressed size.
+}
+
+// readAt returns a buffer with fileSection contents with the underlying File's buffer.
+func (fs *FileSection) readAt(length int, offset int64) ([]byte, error) {
+	if length > len(fs.f.buf) {
+		return nil, errors.New("length larger than file buffer")
+	}
+	s := fs.ptr()
+	n, err := s.sr.ReadAt(fs.f.buf[:length], offset)
+	if err != nil {
+		return nil, err
+	}
+	return fs.f.buf[:n], nil
 }
