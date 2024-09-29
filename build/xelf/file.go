@@ -407,7 +407,7 @@ func (fs FileSection) OfProg() (progIdx int, err error) {
 
 		if aliases(sAddr, sAddr+1, pAddr, pEnd) && aliases(sEnd-1, sEnd, pAddr, pEnd) {
 			if progIdx >= 0 {
-				return -1, errors.New("section aliases with more than a single prog")
+				return -1, errSectionAliasDup
 			}
 			progIdx = i
 		}
@@ -446,21 +446,21 @@ func (f *File) AppendTableStr(dst []byte, start uint32) ([]byte, error) {
 	if s.Type != SecTypeStrTab {
 		return dst, makeFormatErr(s.Offset, "strndx points to a non-stringtable section type", s.Type)
 	}
-	dst, err = shstr.appendStr(dst, int(start))
+	dst, err = shstr.appendStr(dst, int64(start))
 	if err != nil {
 		return dst, err
 	}
 	return dst, nil
 }
 
-// appendStr extracts a null terminated string from an ELF string table and appends it to dst.
-func (fs FileSection) appendStr(dst []byte, start int) ([]byte, error) {
+// appendStr extracts a null terminated string from an ELF string table starting at start and appends it to dst.
+func (fs FileSection) appendStr(dst []byte, start int64) ([]byte, error) {
 	if start < 0 {
 		return dst, errors.New("bad section header name value")
 	} else if int64(start) >= fs.Size() {
 		return dst, errors.New("start of string exceeds section size")
 	}
-	secData, err := fs.readAt(fs.f.buf[:], int64(start))
+	secData, err := fs.readAt(fs.f.buf[:], start)
 	if err != nil {
 		return dst, err
 	}

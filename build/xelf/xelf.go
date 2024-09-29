@@ -120,6 +120,7 @@ var (
 	errBadClass               = errors.New("invalid/unsupported ELF class")
 	errReadFromNobits         = errors.New("unexpected read from SHT_NOBITS section")
 	errNoSymbols              = errors.New("no symbol section")
+	errSectionAliasDup        = errors.New("section aliases with more than a single prog")
 )
 
 type Header struct {

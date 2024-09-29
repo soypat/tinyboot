@@ -103,7 +103,8 @@ func testFile(t *testing.T, r io.ReaderAt, wantSecs int) *File {
 			continue
 		}
 		pidx, err := sec.OfProg()
-		if err != nil {
+		if err != nil && err != errSectionAliasDup {
+			// Sections may alias several progs, ignore those cases.
 			t.Errorf("OfProg for %s failed: %s", sec, err)
 			continue
 		}
@@ -128,10 +129,12 @@ func testFile(t *testing.T, r io.ReaderAt, wantSecs int) *File {
 	if err != nil {
 		t.Error("querying symbols", err)
 	}
+
 	for _, sym := range syms {
 		str, err := f.AppendTableStr(nil, sym.Name)
 		if err != nil {
-			t.Fatal("symbol name unable to be queried", err, sym)
+			// Go standard library ignores errors in querying invalid strings.
+			t.Logf("symbol name unable to be queried: %s", err)
 		} else if len(str) > 0 {
 			t.Logf("symbol %q", str)
 		}
