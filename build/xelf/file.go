@@ -54,7 +54,7 @@ func (f *File) Read(r io.ReaderAt) error {
 		if err != nil {
 			return makeFormatErr(header.Shoff, err.Error(), sh)
 		}
-		header.Shnum = uint16(sh.FileSize)
+		header.Shnum = uint16(sh.SizeOnFile)
 
 		if sh.Type != SecTypeNull {
 			return makeFormatErr(header.Shoff, "invalid type of the initial section", sh.Type)
@@ -107,7 +107,7 @@ func (f *File) Read(r io.ReaderAt) error {
 		}
 		progs[i] = prog{
 			ProgHeader: ph,
-			sr:         *io.NewSectionReader(r, int64(ph.Off), int64(ph.Filesz)),
+			sr:         *io.NewSectionReader(r, int64(ph.Off), int64(ph.SizeOnFile)),
 		}
 	}
 
@@ -139,7 +139,7 @@ func (f *File) Read(r io.ReaderAt) error {
 		}
 		sections[i] = section{
 			SectionHeader: sh,
-			sr:            *io.NewSectionReader(r, int64(sh.Offset), int64(sh.FileSize)),
+			sr:            *io.NewSectionReader(r, int64(sh.Offset), int64(sh.SizeOnFile)),
 		}
 	}
 	*f = File{
@@ -217,16 +217,18 @@ func (f *File) Header() Header {
 	return f.hdr
 }
 
-func (f *File) Prog(progIdx int) (ProgSection, error) {
+// Prog returns the program at progIdx index.
+func (f *File) Prog(progIdx int) (FileProg, error) {
 	if progIdx >= len(f.sections) || progIdx < 0 {
-		return ProgSection{}, errors.New("OOB/negative prog index")
+		return FileProg{}, errors.New("OOB/negative prog index")
 	}
-	return ProgSection{
+	return FileProg{
 		f:      f,
 		pindex: progIdx,
 	}, nil
 }
 
+// Section returns the section at sectionIdx index.
 func (f *File) Section(sectionIdx int) (FileSection, error) {
 	if sectionIdx >= len(f.sections) || sectionIdx < 0 {
 		return FileSection{}, errors.New("OOB/negative section index")
@@ -237,6 +239,7 @@ func (f *File) Section(sectionIdx int) (FileSection, error) {
 	}, nil
 }
 
+// SectionByName returns the first section in f with the name.
 func (f *File) SectionByName(name string) (FileSection, error) {
 	nsect := f.NumSections()
 	for i := 0; i < nsect; i++ {
@@ -252,7 +255,22 @@ func (f *File) SectionByName(name string) (FileSection, error) {
 			return s, nil
 		}
 	}
-	return FileSection{}, errors.New("section not found")
+	return FileSection{}, errors.New("section by index not found")
+}
+
+// SectionByType returns the first section in f with the given type.
+func (f *File) SectionByType(typ SectionType) (FileSection, error) {
+	nsect := f.NumSections()
+	for i := 0; i < nsect; i++ {
+		s, err := f.Section(i)
+		if err != nil {
+			return FileSection{}, err
+		}
+		if s.ptr().Type == typ {
+			return s, nil
+		}
+	}
+	return FileSection{}, errors.New("section by type not found")
 }
 
 // FileSection is the handle to a file's section.
@@ -272,11 +290,15 @@ func (fs FileSection) SectionHeader() SectionHeader {
 
 // Size returns the size of the ELF section body after decompression in bytes.
 func (fs FileSection) Size() int64 {
-	return int64(fs.ptr().FileSize) // TODO:calculate uncompressed size.
+	s := fs.ptr()
+	if s.Flags&SectionFlag(secFlagCompressed) != 0 {
+		return -1 // TODO:calculate uncompressed size.
+	}
+	return int64(s.SizeOnFile)
 }
 
 func (fs FileSection) AppendName(dst []byte) (_ []byte, err error) {
-	return fs.f.appendTableStr(dst, int(fs.ptr().Name))
+	return fs.f.AppendTableStr(dst, fs.ptr().Name)
 }
 
 func (fs FileSection) Name() (string, error) {
@@ -291,9 +313,9 @@ func (fs FileSection) Name() (string, error) {
 func (fs FileSection) Open() io.ReadSeeker {
 	s := fs.ptr()
 	if s.Type == SecTypeNobits {
-		return io.NewSectionReader(&nobitsSectionReader{}, 0, int64(s.FileSize))
+		return io.NewSectionReader(&nobitsSectionReader{}, 0, int64(s.SizeOnFile))
 	} else if s.Flags&SectionFlag(secFlagCompressed) != 0 {
-		return io.NewSectionReader(&unsupportedCompressionReader{}, 0, int64(s.FileSize))
+		return io.NewSectionReader(&unsupportedCompressionReader{}, 0, int64(s.SizeOnFile))
 	}
 	return io.NewSectionReader(&s.sr, 0, 1<<63-1)
 }
@@ -327,27 +349,27 @@ func (fs FileSection) AppendData(dst []byte) (_ []byte, err error) {
 	return dst, nil
 }
 
-type ProgSection struct {
+type FileProg struct {
 	f      *File
 	pindex int
 }
 
-func (ps ProgSection) ptr() *prog {
-	return &ps.f.progs[ps.pindex]
+func (fp FileProg) ptr() *prog {
+	return &fp.f.progs[fp.pindex]
 }
 
 // ProgHeader returns the program's header.
-func (ps ProgSection) ProgHeader() ProgHeader {
-	return ps.ptr().ProgHeader
+func (fp FileProg) ProgHeader() ProgHeader {
+	return fp.ptr().ProgHeader
 }
 
 // Size returns the size of the ELF program body after decompression in bytes.
-func (ps ProgSection) Size() int64 {
-	return int64(ps.ptr().Filesz) // TODO:calculate uncompressed size.
+func (fp FileProg) Size() int64 {
+	return int64(fp.ptr().SizeOnFile) // TODO:calculate uncompressed size.
 }
 
 // Open returns a new [io.ReadSeeker] reading the ELF program body.
-func (ps ProgSection) Open() io.ReadSeeker { return io.NewSectionReader(&ps.ptr().sr, 0, 1<<63-1) }
+func (fp FileProg) Open() io.ReadSeeker { return io.NewSectionReader(&fp.ptr().sr, 0, 1<<63-1) }
 
 // readAt returns a buffer with fileSection contents with the underlying File's buffer.
 func (fs FileSection) readAt(buf []byte, offset int64) ([]byte, error) {
@@ -358,7 +380,60 @@ func (fs FileSection) readAt(buf []byte, offset int64) ([]byte, error) {
 	return readSRInto(buf, &s.sr, offset)
 }
 
-func (f *File) appendTableStr(dst []byte, start int) ([]byte, error) {
+// OfProg returns the prog segment index the section belongs to in memory. OfProg returns error in following cases:
+//   - The section occupies no prog memory, which is is true when [SectionHeader.Type] != [SecTypeProgBits].
+//   - The section is zero sized.
+//   - The section belongs to more than a single prog.
+//   - The section is not contained within any of the progs.
+func (fs FileSection) OfProg() (progIdx int, err error) {
+	sz := fs.Size()
+	s := fs.ptr()
+	if s.Type != SecTypeProgBits || sz <= 0 {
+		return -1, errors.New("section does not correspond to prog memory")
+	}
+
+	sAddr := s.Addr
+	sEnd := sAddr + uint64(sz)
+	nprog := fs.f.NumProgs()
+	progIdx = -1
+	for i := 0; i < nprog; i++ {
+		prog, err := fs.f.Prog(i)
+		if err != nil {
+			return 0, err
+		}
+		hdr := prog.ProgHeader()
+		pAddr := hdr.Vaddr
+		pEnd := hdr.Vaddr + hdr.Memsz
+
+		if aliases(sAddr, sAddr+1, pAddr, pEnd) && aliases(sEnd-1, sEnd, pAddr, pEnd) {
+			if progIdx >= 0 {
+				return -1, errors.New("section aliases with more than a single prog")
+			}
+			progIdx = i
+		}
+	}
+	if progIdx < 0 {
+		return -1, errors.New("section does not correspond to a prog")
+	}
+	return progIdx, nil
+}
+
+// IsProgAlloc returns true if the section belongs to a prog segment that occupies memory.
+func (f FileSection) IsProgAlloc() bool {
+	hdr := f.SectionHeader()
+	return hdr.Type == SecTypeProgBits && hdr.Flags&SectionFlag(secFlagAlloc) != 0 && hdr.SizeOnFile > 0
+}
+
+func (f FileSection) String() string {
+	if f.f == nil {
+		return "<nil FileSection>"
+	}
+	name, _ := f.Name()
+	hdr := f.SectionHeader()
+	return fmt.Sprintf("%s, %s addr=%#x size=%d", name, hdr.Type.String(), hdr.Addr, f.Size())
+}
+
+func (f *File) AppendTableStr(dst []byte, start uint32) ([]byte, error) {
 	strndx := int(f.hdr.Shstrndx)
 	if strndx == 0 {
 		return dst, nil // No string table in ELF.
@@ -371,7 +446,7 @@ func (f *File) appendTableStr(dst []byte, start int) ([]byte, error) {
 	if s.Type != SecTypeStrTab {
 		return dst, makeFormatErr(s.Offset, "strndx points to a non-stringtable section type", s.Type)
 	}
-	dst, err = shstr.appendStr(dst, start)
+	dst, err = shstr.appendStr(dst, int(start))
 	if err != nil {
 		return dst, err
 	}
@@ -380,8 +455,10 @@ func (f *File) appendTableStr(dst []byte, start int) ([]byte, error) {
 
 // appendStr extracts a null terminated string from an ELF string table and appends it to dst.
 func (fs FileSection) appendStr(dst []byte, start int) ([]byte, error) {
-	if start < 0 || int64(start) >= fs.Size() {
+	if start < 0 {
 		return dst, errors.New("bad section header name value")
+	} else if int64(start) >= fs.Size() {
+		return dst, errors.New("start of string exceeds section size")
 	}
 	secData, err := fs.readAt(fs.f.buf[:], int64(start))
 	if err != nil {

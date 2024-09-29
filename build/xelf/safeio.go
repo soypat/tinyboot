@@ -48,3 +48,7 @@ func slicesGrow[S ~[]E, E any](s S, n int) S {
 	}
 	return s
 }
+
+func aliases[T ~int64 | ~uint64 | ~int](start0, end0, start1, end1 T) bool {
+	return start0 < end1 && end0 > start1
+}

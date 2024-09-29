@@ -2,7 +2,7 @@ package xelf
 
 // Version is found in Header.Ident[EI_VERSION] and Header.Version.
 //
-//go:generate stringer -linecomment -output=stringers.go -type=Class,Data,OSABI,Type,Machine,SectionIndex,ProgType,sectionFlag,progFlag,NType,SymVis,SymBind,SymType,RX86_64,RAARCH64,RAlpha,RARM,R386,RMIPS,RLoongArch,RPPC,RPPC64,RRISCV
+//go:generate stringer -linecomment -output=stringers.go -type=Class,SectionType,Data,OSABI,Type,Machine,SectionIndex,ProgType,sectionFlag,progFlag,NType,SymVis,SymBind,SymType,RX86_64,RAARCH64,RAlpha,RARM,R386,RMIPS,RLoongArch,RPPC,RPPC64,RRISCV
 
 // Version is found in [Header].
 type Version byte

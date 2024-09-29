@@ -97,12 +97,29 @@ const (
 	offSInfo64      = 44 // unsafe.Offsetof(elf.Section64{}.Info)
 	offSAddralign64 = 48 // unsafe.Offsetof(elf.Section64{}.Addralign)
 	offSEntsize64   = 56 // unsafe.Offsetof(elf.Section64{}.Entsize)
+
+	symSize32 = 16
+
+	offSymValue32 = 4
+	offSymSize32  = 8
+	offSymInfo32  = 12
+	offSymOther32 = 13
+	offSymShndx32 = 14
+
+	symSize64 = 24
+
+	offSymInfo64  = 4
+	offSymOther64 = 5
+	offSymShndx64 = 6
+	offSymValue64 = 8
+	offSymSize64  = 16
 )
 
 var (
 	errCompressionUnsupported = errors.New("compression type unsupported")
-	errInvalidClass           = errors.New("invalid ELF class")
+	errBadClass               = errors.New("invalid/unsupported ELF class")
 	errReadFromNobits         = errors.New("unexpected read from SHT_NOBITS section")
+	errNoSymbols              = errors.New("no symbol section")
 )
 
 type Header struct {
@@ -248,7 +265,7 @@ func (h Header) Put(b []byte) (n int, err error) {
 	if err != nil {
 		return 0, err
 	} else if h.Class != Class32 && h.Class != Class64 {
-		return 0, errInvalidClass
+		return 0, errBadClass
 	}
 
 	binary.LittleEndian.PutUint32(b, magicLE)
@@ -303,14 +320,14 @@ func (h Header) HeaderSize() int {
 type ProgFlag uint32
 
 type ProgHeader struct {
-	Type   ProgType
-	Flags  ProgFlag
-	Off    uint64
-	Vaddr  uint64
-	Paddr  uint64
-	Filesz uint64
-	Memsz  uint64
-	Align  uint64
+	Type       ProgType // Entry type.
+	Flags      ProgFlag // Access permission flags.
+	Off        uint64   // File offset of contents.
+	Vaddr      uint64   // Virtual address in memory image.
+	Paddr      uint64   // Physical address.
+	SizeOnFile uint64   // Size of contents in file.
+	Memsz      uint64   // Size of contents in memory. Can be set larger than Filesz to indicate uninitialized memory.
+	Align      uint64   // Alignment in memory and file.
 }
 
 func DecodeProgHeader(b []byte, class Class, bo binary.ByteOrder) (ph ProgHeader, n int, err error) {
@@ -324,7 +341,7 @@ func DecodeProgHeader(b []byte, class Class, bo binary.ByteOrder) (ph ProgHeader
 		ph.Off = uint64(bo.Uint32(b[offPOff32:]))
 		ph.Vaddr = uint64(bo.Uint32(b[offPVaddr32:]))
 		ph.Paddr = uint64(bo.Uint32(b[offPPaddr32:]))
-		ph.Filesz = uint64(bo.Uint32(b[offPFilesz32:]))
+		ph.SizeOnFile = uint64(bo.Uint32(b[offPFilesz32:]))
 		ph.Memsz = uint64(bo.Uint32(b[offPMemsz32:]))
 		ph.Align = uint64(bo.Uint32(b[offPAlign32:]))
 		n = progHeaderSize32
@@ -337,12 +354,12 @@ func DecodeProgHeader(b []byte, class Class, bo binary.ByteOrder) (ph ProgHeader
 		ph.Off = bo.Uint64(b[offPOff64:])
 		ph.Vaddr = bo.Uint64(b[offPVaddr64:])
 		ph.Paddr = bo.Uint64(b[offPPaddr64:])
-		ph.Filesz = bo.Uint64(b[offPFilesz64:])
+		ph.SizeOnFile = bo.Uint64(b[offPFilesz64:])
 		ph.Memsz = bo.Uint64(b[offPMemsz64:])
 		ph.Align = bo.Uint64(b[offPAlign64:])
 		n = progHeaderSize64
 	default:
-		return ph, 0, errInvalidClass
+		return ph, 0, errBadClass
 	}
 	return ph, n, nil
 }
@@ -358,7 +375,7 @@ func (ph ProgHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, err
 		bo.PutUint32(b[offPOff32:], uint32(ph.Off))
 		bo.PutUint32(b[offPVaddr32:], uint32(ph.Vaddr))
 		bo.PutUint32(b[offPPaddr32:], uint32(ph.Paddr))
-		bo.PutUint32(b[offPFilesz32:], uint32(ph.Filesz))
+		bo.PutUint32(b[offPFilesz32:], uint32(ph.SizeOnFile))
 		bo.PutUint32(b[offPMemsz32:], uint32(ph.Memsz))
 		bo.PutUint32(b[offPAlign32:], uint32(ph.Align))
 		n = progHeaderSize32
@@ -371,12 +388,12 @@ func (ph ProgHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, err
 		bo.PutUint64(b[offPOff64:], ph.Off)
 		bo.PutUint64(b[offPVaddr64:], ph.Vaddr)
 		bo.PutUint64(b[offPPaddr64:], ph.Paddr)
-		bo.PutUint64(b[offPFilesz64:], ph.Filesz)
+		bo.PutUint64(b[offPFilesz64:], ph.SizeOnFile)
 		bo.PutUint64(b[offPMemsz64:], ph.Memsz)
 		bo.PutUint64(b[offPAlign64:], ph.Align)
 		n = progHeaderSize64
 	default:
-		return 0, errInvalidClass
+		return 0, errBadClass
 	}
 	return n, nil
 }
@@ -407,7 +424,7 @@ func (ph ProgHeader) Validate(class Class) (err error) {
 	if ph.Off > math.MaxInt64 {
 		err = errors.Join(err, errors.New("program header offset overflows int64"))
 	}
-	if ph.Filesz > math.MaxInt64 {
+	if ph.SizeOnFile > math.MaxInt64 {
 		err = errors.Join(err, errors.New("program header file size overflows int64"))
 	}
 	if class == Class32 {
@@ -432,22 +449,19 @@ type SectionFlag uint64
 
 // A SectionHeader represents a single ELF section header.
 type SectionHeader struct {
-	Name   uint32
-	Type   SectionType
-	Flags  SectionFlag
-	Addr   uint64
-	Offset uint64
-	// Size      uint64
-	Link      uint32
-	Info      uint32
-	Addralign uint64
-	Entsize   uint64
-
-	// FileSize is the size of this section in the file in bytes.
-	// If a section is compressed, FileSize is the size of the
-	// compressed data, while Size (above) is the size of the
-	// uncompressed data.
-	FileSize uint64
+	Name   uint32      // Section name (index into the section header string table).
+	Type   SectionType // Section type.
+	Flags  SectionFlag // Section flags.
+	Addr   uint64      // Address in memory image.
+	Offset uint64      // Offset in file.
+	// SizeOnFile is the size of this section in the ELF file in bytes.
+	// If a section is compressed, SizeOnFile is the size of the
+	// compressed data on disk.
+	SizeOnFile uint64
+	Link       uint32 // Index of a related section.
+	Info       uint32 // Depends on section type.
+	Addralign  uint64 // Alignment in bytes.
+	Entsize    uint64 // Size of each entry in section.
 }
 
 func DecodeSectionHeader(b []byte, class Class, bo binary.ByteOrder) (sh SectionHeader, n int, err error) {
@@ -461,7 +475,7 @@ func DecodeSectionHeader(b []byte, class Class, bo binary.ByteOrder) (sh Section
 		sh.Flags = SectionFlag(bo.Uint32(b[offSFlags32:]))
 		sh.Addr = uint64(bo.Uint32(b[offSAddr32:]))
 		sh.Offset = uint64(bo.Uint32(b[offSOff32:]))
-		sh.FileSize = uint64(bo.Uint32(b[offSSize32:]))
+		sh.SizeOnFile = uint64(bo.Uint32(b[offSSize32:]))
 		sh.Link = bo.Uint32(b[offSLink32:])
 		sh.Info = bo.Uint32(b[offSInfo32:])
 		sh.Addralign = uint64(bo.Uint32(b[offSAddralign32:]))
@@ -476,14 +490,14 @@ func DecodeSectionHeader(b []byte, class Class, bo binary.ByteOrder) (sh Section
 		sh.Flags = SectionFlag(bo.Uint64(b[offSFlags64:]))
 		sh.Addr = bo.Uint64(b[offSAddr64:])
 		sh.Offset = bo.Uint64(b[offSOff64:])
-		sh.FileSize = bo.Uint64(b[offSSize64:])
+		sh.SizeOnFile = bo.Uint64(b[offSSize64:])
 		sh.Link = bo.Uint32(b[offSLink64:])
 		sh.Info = bo.Uint32(b[offSInfo64:])
 		sh.Addralign = bo.Uint64(b[offSAddralign64:])
 		sh.Entsize = bo.Uint64(b[offSEntsize64:])
 		n = sectionHeaderSize64
 	default:
-		return sh, 0, errInvalidClass
+		return sh, 0, errBadClass
 	}
 	return sh, n, nil
 }
@@ -499,7 +513,7 @@ func (sh SectionHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, 
 		bo.PutUint32(b[offSFlags32:], uint32(sh.Flags))         // sh.Flags
 		bo.PutUint32(b[offSAddr32:], uint32(sh.Addr))           // sh.Addr
 		bo.PutUint32(b[offSOff32:], uint32(sh.Offset))          // sh.Offset
-		bo.PutUint32(b[offSSize32:], uint32(sh.FileSize))       // sh.FileSize
+		bo.PutUint32(b[offSSize32:], uint32(sh.SizeOnFile))     // sh.FileSize
 		bo.PutUint32(b[offSLink32:], sh.Link)                   // sh.Link
 		bo.PutUint32(b[offSInfo32:], sh.Info)                   // sh.Info
 		bo.PutUint32(b[offSAddralign32:], uint32(sh.Addralign)) // sh.Addralign
@@ -514,14 +528,14 @@ func (sh SectionHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, 
 		bo.PutUint64(b[offSFlags64:], uint64(sh.Flags)) // sh.Flags
 		bo.PutUint64(b[offSAddr64:], sh.Addr)           // sh.Addr
 		bo.PutUint64(b[offSOff64:], sh.Offset)          // sh.Offset
-		bo.PutUint64(b[offSSize64:], sh.FileSize)       // sh.FileSize
+		bo.PutUint64(b[offSSize64:], sh.SizeOnFile)     // sh.FileSize
 		bo.PutUint32(b[offSLink64:], sh.Link)           // sh.Link
 		bo.PutUint32(b[offSInfo64:], sh.Info)           // sh.Info
 		bo.PutUint64(b[offSAddralign64:], sh.Addralign) // sh.Addralign
 		bo.PutUint64(b[offSEntsize64:], sh.Entsize)     // sh.Entsize
 		n = sectionHeaderSize64
 	default:
-		return 0, errInvalidClass
+		return 0, errBadClass
 	}
 	return n, nil
 }
@@ -530,7 +544,7 @@ func (sh SectionHeader) Validate(class Class) (err error) {
 	if sh.Offset > math.MaxInt64 {
 		err = errors.New("section header offset overflows int64")
 	}
-	if sh.FileSize > math.MaxInt64 {
+	if sh.SizeOnFile > math.MaxInt64 {
 		err = errors.Join(err, errors.New("section header size overflows int64"))
 	}
 	if class == Class32 {
@@ -540,7 +554,7 @@ func (sh SectionHeader) Validate(class Class) (err error) {
 		if sh.Addr > math.MaxUint32 {
 			err = errors.Join(err, errors.New("section header addr overflow (Class32)"))
 		}
-		if sh.FileSize > math.MaxUint32 {
+		if sh.SizeOnFile > math.MaxUint32 {
 			err = errors.Join(err, errors.New("section header file size overflow (Class32)"))
 		}
 		if sh.Addralign > math.MaxUint32 {
@@ -562,4 +576,100 @@ func (sh SectionHeader) Validate(class Class) (err error) {
 type section struct {
 	SectionHeader
 	sr io.SectionReader
+}
+
+// Rel stores relocation information.
+type Rel struct {
+	Off  uint64 // Location to be relocated.
+	Info uint64 // Relocation type and symbol index
+}
+
+// Rela is a [Rel] that needs an addend field.
+type Rela struct {
+	Rel
+	Addend int64 // Addend: An additional constant used in the relocation computation.
+}
+
+// Sym stores ELF symbol table entry.
+type Sym struct {
+	Name  uint32 // String table index of name.
+	Info  uint8  // Type and binding information.
+	Other uint8  // Reserved (not used).
+	Shndx uint16 // Section index of symbol.
+	Value uint64 // Symbol value.
+	Size  uint64 // Size of associated object.
+}
+
+// Dyn is a ELF dynamic structure. The ".dynamic" section contains an array of them.
+type Dyn struct {
+	Tag   int64  // Entry type.
+	Value uint64 // Integer/address value.
+}
+
+func DecodeSym(b []byte, class Class, bo binary.ByteOrder) (sym Sym, n int, err error) {
+	if (class == Class32 && len(b) < symSize32) || (class == Class64 && len(b) < symSize64) {
+		return Sym{}, 0, io.ErrShortBuffer
+	}
+
+	sym.Name = bo.Uint32(b[0:])
+	switch class {
+	case Class32:
+		sym.Info = b[offSymInfo32]
+		sym.Other = b[offSymOther32]
+		sym.Shndx = bo.Uint16(b[offSymShndx32:])
+		sym.Size = uint64(bo.Uint32(b[offSymSize32:]))
+		sym.Value = uint64(bo.Uint32(b[offSymValue32:]))
+		n = symSize32
+
+	case Class64:
+		sym.Info = b[offSymInfo64]
+		sym.Other = b[offSymOther64]
+		sym.Shndx = bo.Uint16(b[offSymShndx64:])
+		sym.Size = bo.Uint64(b[offSymSize64:])
+		sym.Value = bo.Uint64(b[offSymValue64:])
+		n = symSize64
+
+	default:
+		return Sym{}, 0, errBadClass
+	}
+	return sym, n, nil
+}
+
+func DecodeRel(b []byte, class Class, bo binary.ByteOrder) (rel Rel, n int, err error) {
+	if (class == Class32 && len(b) < 4*2) || (class == Class64 && len(b) < 8*2) {
+		return Rel{}, 0, io.ErrShortBuffer
+	}
+	switch class {
+	case Class32:
+		rel.Info = uint64(bo.Uint32(b))
+		rel.Off = uint64(bo.Uint32(b[4:]))
+		n = 8
+	case Class64:
+		rel.Info = bo.Uint64(b)
+		rel.Off = bo.Uint64(b[8:])
+		n = 16
+	default:
+		return Rel{}, 0, errBadClass
+	}
+	return rel, n, nil
+}
+
+func DecodeRela(b []byte, class Class, bo binary.ByteOrder) (rela Rela, n int, err error) {
+	if (class == Class32 && len(b) < 4*3) || (class == Class64 && len(b) < 8*3) {
+		return Rela{}, 0, io.ErrShortBuffer
+	}
+	rel, n, err := DecodeRel(b, class, bo)
+	if err != nil {
+		return Rela{}, n, err
+	}
+	rela.Rel = rel
+	switch class {
+	case Class32:
+		rela.Addend = int64(int32(bo.Uint32(b[n:])))
+		n += 4
+	case Class64:
+		rela.Addend = int64(bo.Uint64(b[n:]))
+		n += 8
+	}
+	return rela, n, nil
 }
