@@ -1,7 +1,6 @@
 package xelf
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -25,6 +24,7 @@ const (
 	offVersionDup        = 20 // ELF format version after IDENT section.
 
 	// Size dependent offsets.
+	headerSize32 = 52
 
 	offEntry32     = 24 // unsafe.Offsetof(elf.Header32{}.Entry)
 	offPhoff32     = 28 // unsafe.Offsetof(elf.Header32{}.Phoff)
@@ -36,6 +36,8 @@ const (
 	offShentsize32 = 46 // unsafe.Offsetof(elf.Header32{}.Shentsize)
 	offShnum32     = 48 // unsafe.Offsetof(elf.Header32{}.Shnum)
 	offShstrndx32  = 50 // unsafe.Offsetof(elf.Header32{}.Shstrndx)
+
+	headerSize64 = 64
 
 	offEntry64     = 24 // unsafe.Offsetof(elf.Header64{}.Entry)
 	offPhoff64     = 32 // unsafe.Offsetof(elf.Header64{}.Phoff)
@@ -101,13 +103,6 @@ var (
 	errInvalidClass = errors.New("invalid ELF class")
 )
 
-type File struct {
-	hdr      Header
-	progs    []prog
-	sections []section
-	buf      [fileBufSize]byte
-}
-
 type Header struct {
 	Class      Class
 	Data       Data
@@ -129,124 +124,7 @@ type Header struct {
 	Shstrndx  uint16 // Section name strings section.
 }
 
-func (f *File) Read(r io.ReaderAt) error {
-	buf := f.buf[:]
-	if _, err := r.ReadAt(buf[:64], 0); err != nil {
-		return err
-	}
-	header, _, err := DecodeHeader(buf)
-	if err != nil {
-		return err
-	}
-	// If the number of sections is greater than or equal to SHN_LORESERVE
-	// (0xff00), shnum has the value zero and the actual number of section
-	// header table entries is contained in the sh_size field of the section
-	// header at index 0.
-	bo := header.ByteOrder()
-	if header.Shoff > 0 && header.Shnum == 0 {
-		println("special initial section")
-		n, err := r.ReadAt(buf[:sectionHeaderSize64], int64(header.Shoff))
-		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), n)
-		}
-		sh, _, err := DecodeSectionHeader(buf[:n], header.Class, bo)
-		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), sh)
-		}
-		err = sh.Validate()
-		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), sh)
-		}
-		header.Shnum = uint16(sh.FileSize)
-
-		if sh.Type != SecTypeNull {
-			return makeFormatErr(header.Shoff, "invalid type of the initial section", sh.Type)
-		} else if SectionIndex(header.Shnum) < SecIdxReserveLo {
-			return makeFormatErr(header.Shoff, "invalid shnum contained in sh_size", header.Shnum)
-		}
-		// If the section name string table section index is greater than or
-		// equal to SHN_LORESERVE (0xff00), this member has the value
-		// SHN_XINDEX (0xffff) and the actual index of the section name
-		// string table section is contained in the sh_link field of the
-		// section header at index 0.
-		if int(header.Shstrndx) == int(SecIdxXindex) {
-			if sh.Link > math.MaxUint16 {
-				return makeFormatErr(header.Shoff, "initial section link overflows uint16 as shstrndx", sh.Link)
-			}
-			header.Shstrndx = uint16(sh.Link)
-			if header.Shstrndx < uint16(SecIdxReserveLo) {
-				return makeFormatErr(header.Shoff, "invalid shstrndx contained in sh_link", header.Shstrndx)
-			} else if header.Shstrndx >= header.Shnum {
-				return makeFormatErr(header.Shoff, "shstrndx from sh_link in initial section greater than shnum", header.Shstrndx)
-			}
-		}
-	}
-	err = header.Validate()
-	if err != nil {
-		return err
-	}
-
-	phentsize := int64(header.Phentsize)
-	progHeaderOff := int64(header.Phoff)
-
-	progs := make([]prog, header.Phnum)
-	for i := int64(0); i < int64(header.Phnum); i++ {
-		progOff := i * phentsize
-		fileOff := progHeaderOff + progOff
-		n, err := r.ReadAt(buf[:progHeaderSize64], fileOff)
-		if err != nil {
-			return err
-		}
-		ph, _, err := DecodeProgHeader(buf[:n], header.Class, bo)
-		if err != nil {
-			return err
-		}
-		err = ph.Validate()
-		if err != nil {
-			return makeFormatErr(uint64(fileOff), err.Error(), ph)
-		}
-		progs[i] = prog{
-			ProgHeader: ph,
-			r:          *io.NewSectionReader(r, int64(ph.Off), int64(ph.Filesz)),
-		}
-	}
-
-	c := sliceCap[section](uint64(header.Shnum))
-	if c < 0 {
-		return makeFormatErr(0, "too many sections", header.Shnum)
-	}
-	sections := make([]section, c)
-	shentsize := int64(header.Shentsize)
-	sectBase := int64(header.Shnum) * shentsize
-	for i := int64(0); i < int64(header.Shnum); i++ {
-		sectOff := i * int64(header.Shentsize)
-		fileOff := sectBase + sectOff
-		n, err := r.ReadAt(buf[:sectionHeaderSize64], fileOff)
-		if err != nil {
-			return err
-		}
-		sh, _, err := DecodeSectionHeader(buf[:n], header.Class, bo)
-		if err != nil {
-			return err
-		}
-		err = sh.Validate()
-		if err != nil {
-			return makeFormatErr(uint64(fileOff), err.Error(), err)
-		}
-		sections[i] = section{
-			SectionHeader: sh,
-			sr:            *io.NewSectionReader(r, int64(sh.Offset), int64(sh.FileSize)),
-		}
-	}
-	*f = File{
-		hdr:      header,
-		progs:    progs,
-		sections: sections,
-	}
-	return nil
-}
-
-func (h *Header) ByteOrder() (bo binary.ByteOrder) {
+func (h Header) ByteOrder() (bo binary.ByteOrder) {
 	switch h.Data {
 	case Data2LSB:
 		bo = binary.LittleEndian
@@ -258,12 +136,13 @@ func (h *Header) ByteOrder() (bo binary.ByteOrder) {
 	return bo
 }
 
-func (h *Header) Validate() (err error) {
+func (h Header) Validate() (err error) {
 	if h.Class != Class32 && h.Class != Class64 {
 		return makeFormatErr(offClass, "invalid class", h.Class)
 	}
+	err = h.Data.Validate()
 	if h.Shoff > math.MaxInt64 {
-		err = makeFormatErr(0, "shoff overflows int64", h.Shoff)
+		err = errors.Join(err, makeFormatErr(0, "shoff overflows int64", h.Shoff))
 	}
 	if h.Phoff > math.MaxInt64 {
 		err = errors.Join(err, makeFormatErr(0, "phoff overflows int64", h.Phoff))
@@ -277,11 +156,11 @@ func (h *Header) Validate() (err error) {
 	var wantPhentSize, wantShentSize uint16
 	switch h.Class {
 	case Class32:
-		wantPhentSize = 8 * 4
-		wantShentSize = 10 * 4
+		wantPhentSize = progHeaderSize32
+		wantShentSize = sectionHeaderSize32
 	case Class64:
-		wantPhentSize = 2*4 + 6*8
-		wantShentSize = 4*4 + 6*8
+		wantPhentSize = progHeaderSize64
+		wantShentSize = sectionHeaderSize64
 	}
 	if h.Phnum > 0 && h.Phentsize < wantPhentSize {
 		err = errors.Join(err, makeFormatErr(0, "invalid phentsize", h.Phentsize))
@@ -293,6 +172,9 @@ func (h *Header) Validate() (err error) {
 }
 
 func DecodeHeader(buf []byte) (header Header, n int, err error) {
+	if len(buf) < headerSize32 {
+		return Header{}, 0, errors.New("too short buffer to decode ELF header")
+	}
 	if magicLE != binary.LittleEndian.Uint32(buf[0:]) {
 		return Header{}, 0, makeFormatErr(0, "bad magic number", buf[0:4])
 	}
@@ -300,13 +182,16 @@ func DecodeHeader(buf []byte) (header Header, n int, err error) {
 	header.Class = Class(buf[offClass])
 	if header.Class != Class32 && header.Class != Class64 {
 		return Header{}, 0, makeFormatErr(offClass, "unknown ELF class", header.Class)
+	} else if header.Class == Class64 && len(buf) < headerSize64 {
+		return Header{}, 0, errors.New("too short buffer to decode Class64 ELF header")
 	}
 
 	header.Data = Data(buf[offData])
-	bo := header.ByteOrder()
-	if bo == nil {
-		return Header{}, 0, makeFormatErr(offData, "unknown ELF data encoding", header.Data)
+	err = header.Data.Validate()
+	if err != nil {
+		return Header{}, 0, err
 	}
+	bo := header.ByteOrder()
 	header.Version = Version(buf[offVersion])
 	if header.Version != VersionCurrent {
 		return Header{}, 0, makeFormatErr(offVersion, "unknown ELF version", header.Version)
@@ -325,26 +210,78 @@ func DecodeHeader(buf []byte) (header Header, n int, err error) {
 	// var phentsize, phnum, shentsize, shnum, shstrndx int
 	switch header.Class {
 	case Class32:
-		n = 52
+		n = headerSize32
 		header.Entry = uint64(bo.Uint16(buf[offEntry32:]))
 		header.Phoff = uint64(bo.Uint32(buf[offPhoff32:]))
 		header.Phentsize = uint16(bo.Uint16(buf[offPhentsize32:]))
 		header.Phnum = bo.Uint16(buf[offPhnum32:])
 		header.Shoff = uint64(bo.Uint32(buf[offShoff32:]))
+		header.Shentsize = bo.Uint16(buf[offShentsize32:])
 		header.Shnum = bo.Uint16(buf[offShnum32:])
 		header.Shstrndx = bo.Uint16(buf[offShstrndx32:])
 	case Class64:
-		n = 64
+		n = headerSize64
 		header.Entry = bo.Uint64(buf[offEntry64:])
 		header.Phoff = bo.Uint64(buf[offPhoff64:])
 		header.Phentsize = bo.Uint16(buf[offPhentsize64:])
 		header.Phnum = bo.Uint16(buf[offPhnum64:])
 		header.Shoff = bo.Uint64(buf[offShoff64:])
+		header.Shentsize = bo.Uint16(buf[offShentsize64:])
 		header.Shnum = bo.Uint16(buf[offShnum64:])
 		header.Shstrndx = bo.Uint16(buf[offShstrndx64:])
 	}
 
 	return header, n, nil
+}
+
+func (h Header) Put(b []byte) (n int, err error) {
+	if len(b) < headerSize32 || h.Class == Class64 && len(b) < headerSize64 {
+		return 0, errors.New("buffer too short to put Header")
+	}
+	// Perform only validation for knowledge on how to marshal data. User should call Validate beforehand.
+	err = h.Data.Validate()
+	if err != nil {
+		return 0, err
+	} else if h.Class != Class32 && h.Class != Class64 {
+		return 0, errInvalidClass
+	}
+
+	binary.LittleEndian.PutUint32(b, magicLE)
+	b[offClass] = byte(h.Class)
+	b[offData] = byte(h.Data)
+	b[offVersion] = byte(h.Version)
+	b[offABIVersion] = h.ABIVersion
+	b[offOSABI] = byte(h.OSABI)
+
+	bo := h.ByteOrder()
+	bo.PutUint16(b[offType:], uint16(h.Type))
+	bo.PutUint16(b[offMachine:], uint16(h.Machine))
+	bo.PutUint32(b[offVersionDup:], uint32(h.Version))
+
+	switch h.Class {
+	case Class32:
+		n = headerSize32
+		bo.PutUint16(b[offEntry32:], uint16(h.Entry))
+		bo.PutUint32(b[offPhoff32:], uint32(h.Phoff))
+		bo.PutUint16(b[offPhentsize32:], h.Phentsize)
+		bo.PutUint16(b[offPhnum32:], h.Phnum)
+		bo.PutUint32(b[offShoff32:], uint32(h.Shoff))
+		bo.PutUint16(b[offShentsize32:], h.Shentsize)
+		bo.PutUint16(b[offShnum32:], h.Shnum)
+		bo.PutUint16(b[offShstrndx32:], h.Shstrndx)
+
+	case Class64:
+		n = headerSize64
+		bo.PutUint64(b[offEntry64:], h.Entry)
+		bo.PutUint64(b[offPhoff64:], h.Phoff)
+		bo.PutUint16(b[offPhentsize64:], h.Phentsize)
+		bo.PutUint16(b[offPhnum64:], h.Phnum)
+		bo.PutUint64(b[offShoff64:], h.Shoff)
+		bo.PutUint16(b[offShentsize64:], h.Shentsize)
+		bo.PutUint16(b[offShnum64:], h.Shnum)
+		bo.PutUint16(b[offShstrndx64:], h.Shstrndx)
+	}
+	return n, nil
 }
 
 type ProgFlag uint32
@@ -394,12 +331,49 @@ func DecodeProgHeader(b []byte, class Class, bo binary.ByteOrder) (ph ProgHeader
 	return ph, n, nil
 }
 
-func (ph *ProgHeader) Validate() (err error) {
+func (ph ProgHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, err error) {
+	switch class {
+	case Class32:
+		if len(b) < progHeaderSize32 {
+			return 0, errors.New("ProgHeader short put buffer")
+		}
+		bo.PutUint32(b[offPType32:], uint32(ph.Type))
+		bo.PutUint32(b[offPFlags32:], uint32(ph.Flags))
+		bo.PutUint32(b[offPOff32:], uint32(ph.Off))
+		bo.PutUint32(b[offPVaddr32:], uint32(ph.Vaddr))
+		bo.PutUint32(b[offPPaddr32:], uint32(ph.Paddr))
+		bo.PutUint32(b[offPFilesz32:], uint32(ph.Filesz))
+		bo.PutUint32(b[offPMemsz32:], uint32(ph.Memsz))
+		bo.PutUint32(b[offPAlign32:], uint32(ph.Align))
+		n = progHeaderSize32
+	case Class64:
+		if len(b) < progHeaderSize64 {
+			return 0, errors.New("ProgHeader short put buffer")
+		}
+		bo.PutUint32(b[offPType64:], uint32(ph.Type))
+		bo.PutUint32(b[offPFlags64:], uint32(ph.Flags))
+		bo.PutUint64(b[offPOff64:], ph.Off)
+		bo.PutUint64(b[offPVaddr64:], ph.Vaddr)
+		bo.PutUint64(b[offPPaddr64:], ph.Paddr)
+		bo.PutUint64(b[offPFilesz64:], ph.Filesz)
+		bo.PutUint64(b[offPMemsz64:], ph.Memsz)
+		bo.PutUint64(b[offPAlign64:], ph.Align)
+		n = progHeaderSize64
+	default:
+		return 0, errInvalidClass
+	}
+	return n, nil
+}
+
+func (ph ProgHeader) Validate(class Class) (err error) {
 	if ph.Off > math.MaxInt64 {
 		err = errors.Join(err, errors.New("program header offset overflows int64"))
 	}
 	if ph.Filesz > math.MaxInt64 {
 		err = errors.Join(err, errors.New("program header file size overflows int64"))
+	}
+	if class == Class32 {
+
 	}
 	return err
 }
@@ -413,7 +387,7 @@ func makeFormatErr(off uint64, msg string, val any) error {
 	if str, ok := val.(fmt.Stringer); ok {
 		val = str.String()
 	}
-	return fmt.Errorf("off=%d %s: %v", off, msg, val)
+	return fmt.Errorf("ELF format error: %s @ off=%d: %v", msg, off, val)
 }
 
 type SectionFlag uint64
@@ -476,12 +450,73 @@ func DecodeSectionHeader(b []byte, class Class, bo binary.ByteOrder) (sh Section
 	return sh, n, nil
 }
 
-func (sh *SectionHeader) Validate() (err error) {
+func (sh SectionHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, err error) {
+	switch class {
+	case Class32:
+		if len(b) < sectionHeaderSize32 {
+			return 0, errors.New("SectionHeader short put buffer")
+		}
+		bo.PutUint32(b[offSName32:], sh.Name)                   // sh.Name
+		bo.PutUint32(b[offSType32:], uint32(sh.Type))           // sh.Type
+		bo.PutUint32(b[offSFlags32:], uint32(sh.Flags))         // sh.Flags
+		bo.PutUint32(b[offSAddr32:], uint32(sh.Addr))           // sh.Addr
+		bo.PutUint32(b[offSOff32:], uint32(sh.Offset))          // sh.Offset
+		bo.PutUint32(b[offSSize32:], uint32(sh.FileSize))       // sh.FileSize
+		bo.PutUint32(b[offSLink32:], sh.Link)                   // sh.Link
+		bo.PutUint32(b[offSInfo32:], sh.Info)                   // sh.Info
+		bo.PutUint32(b[offSAddralign32:], uint32(sh.Addralign)) // sh.Addralign
+		bo.PutUint32(b[offSEntsize32:], uint32(sh.Entsize))     // sh.Entsize
+		n = sectionHeaderSize32
+	case Class64:
+		if len(b) < sectionHeaderSize64 {
+			return 0, errors.New("SectionHeader short put buffer")
+		}
+		bo.PutUint32(b[offSName64:], sh.Name)           // sh.Name
+		bo.PutUint32(b[offSType64:], uint32(sh.Type))   // sh.Type
+		bo.PutUint64(b[offSFlags64:], uint64(sh.Flags)) // sh.Flags
+		bo.PutUint64(b[offSAddr64:], sh.Addr)           // sh.Addr
+		bo.PutUint64(b[offSOff64:], sh.Offset)          // sh.Offset
+		bo.PutUint64(b[offSSize64:], sh.FileSize)       // sh.FileSize
+		bo.PutUint32(b[offSLink64:], sh.Link)           // sh.Link
+		bo.PutUint32(b[offSInfo64:], sh.Info)           // sh.Info
+		bo.PutUint64(b[offSAddralign64:], sh.Addralign) // sh.Addralign
+		bo.PutUint64(b[offSEntsize64:], sh.Entsize)     // sh.Entsize
+		n = sectionHeaderSize64
+	default:
+		return 0, errInvalidClass
+	}
+	return n, nil
+}
+
+func (sh SectionHeader) Validate(class Class) (err error) {
 	if sh.Offset > math.MaxInt64 {
 		err = errors.New("section header offset overflows int64")
 	}
 	if sh.FileSize > math.MaxInt64 {
-		err = errors.Join(err, errors.New("section header size(on file) overflows int64"))
+		err = errors.Join(err, errors.New("section header size overflows int64"))
+	}
+	if class == Class32 {
+		if sh.Offset > math.MaxUint32 {
+			err = errors.Join(err, errors.New("section header offset overflows (Class32)"))
+		}
+		if sh.Addr > math.MaxUint32 {
+			err = errors.Join(err, errors.New("section header addr overflow (Class32)"))
+		}
+		if sh.FileSize > math.MaxUint32 {
+			err = errors.Join(err, errors.New("section header file size overflow (Class32)"))
+		}
+		if sh.Addralign > math.MaxUint32 {
+			err = errors.Join(err, errors.New("section header addralign overflow (Class32)"))
+		}
+		if sh.Entsize > math.MaxUint32 {
+			err = errors.Join(err, errors.New("section header entsize overflow (Class32)"))
+		}
+		if sh.Flags > math.MaxUint32 {
+			err = errors.Join(err, errors.New("section header flags overflow (Class32)"))
+		}
+		if sh.Type > math.MaxUint32 {
+			err = errors.Join(err, errors.New("section header type overflow (Class32)"))
+		}
 	}
 	return err
 }
@@ -489,75 +524,4 @@ func (sh *SectionHeader) Validate() (err error) {
 type section struct {
 	SectionHeader
 	sr io.SectionReader
-}
-
-// FileSection is the handle to a file's section.
-type FileSection struct {
-	f      *File
-	sindex int
-}
-
-func (fs *FileSection) ptr() *section {
-	return &fs.f.sections[fs.sindex]
-}
-
-func (fs *FileSection) Name() (string, error) {
-	strndx := int(fs.f.hdr.Shstrndx)
-	if strndx == 0 {
-		return "", nil // No Str table in ELF.
-	}
-
-	shstr, err := fs.f.Section(strndx)
-	if err != nil {
-		return "", err
-	}
-	s := shstr.ptr()
-	if s.Type != SecTypeStrTab {
-		return "", makeFormatErr(s.Offset, "strndx points to a non-stringtable section type", s.Type)
-	}
-	str, err := getString(shstr, int(fs.ptr().Name))
-	if err != nil {
-		return str, err
-	}
-	return str, nil
-}
-
-func (f *File) Section(sectionIdx int) (FileSection, error) {
-	if sectionIdx >= len(f.sections) || sectionIdx < 0 {
-		return FileSection{}, errors.New("OOB/negative section index")
-	}
-	return FileSection{
-		f:      f,
-		sindex: sectionIdx,
-	}, nil
-}
-
-// getString extracts a string from an ELF string table.
-func getString(strSec FileSection, nameStart int) (string, error) {
-	if nameStart < 0 || int64(nameStart) >= strSec.Size() {
-		return "", errors.New("bad section header name value")
-	}
-	secData, _ := strSec.readAt(fileBufSize, int64(nameStart))
-	strEnd := bytes.IndexByte(secData, 0)
-	if strEnd < 0 {
-		return "", errors.New("name too long or bad data")
-	}
-	return string(secData[:strEnd]), nil
-}
-
-func (fs *FileSection) Size() int64 {
-	return int64(fs.ptr().FileSize) // For now returns uncompressed size.
-}
-
-// readAt returns a buffer with fileSection contents with the underlying File's buffer.
-func (fs *FileSection) readAt(length int, offset int64) ([]byte, error) {
-	if length > len(fs.f.buf) {
-		return nil, errors.New("length larger than file buffer")
-	}
-	s := fs.ptr()
-	n, err := s.sr.ReadAt(fs.f.buf[:length], offset)
-	if err != nil {
-		return nil, err
-	}
-	return fs.f.buf[:n], nil
 }

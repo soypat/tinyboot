@@ -28,6 +28,13 @@ const (
 	Data2MSB             // 2's complement big-endian
 )
 
+func (d Data) Validate() error {
+	if d != Data2LSB && d != Data2MSB {
+		return makeFormatErr(offData, "unknown data encoding", d)
+	}
+	return nil
+}
+
 // OSABI is the operating system (OS) application binary interface (ABI)
 type OSABI uint8
 
@@ -348,7 +355,7 @@ const (
 )
 
 // Prog.Type
-type ProgType int
+type ProgType uint32
 
 const (
 	ProgTypeNull    ProgType = 0 // Unused entry
