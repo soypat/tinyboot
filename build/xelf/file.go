@@ -3,6 +3,7 @@ package xelf
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 )
@@ -11,7 +12,10 @@ type File struct {
 	hdr      Header
 	progs    []prog
 	sections []section
-	buf      [fileBufSize]byte
+
+	// Below are auxiliary buffers used during data marshalling.
+
+	buf [fileBufSize]byte
 }
 
 func (f *File) NumSections() int {
@@ -97,13 +101,13 @@ func (f *File) Read(r io.ReaderAt) error {
 		if err != nil {
 			return err
 		}
-		err = ph.Validate()
+		err = ph.Validate(header.Class)
 		if err != nil {
 			return makeFormatErr(uint64(fileOff), err.Error(), ph)
 		}
 		progs[i] = prog{
 			ProgHeader: ph,
-			r:          *io.NewSectionReader(r, int64(ph.Off), int64(ph.Filesz)),
+			sr:         *io.NewSectionReader(r, int64(ph.Off), int64(ph.Filesz)),
 		}
 	}
 
@@ -146,9 +150,81 @@ func (f *File) Read(r io.ReaderAt) error {
 	return nil
 }
 
-func (f *File) WriteTo(w io.Writer) (int64, error) {
+func (f *File) WriteTo(w io.Writer) (n int64, err error) {
+	return n, errors.ErrUnsupported
+	b := f.buf[:]
+	err = f.hdr.Validate()
+	if err != nil {
+		return 0, err
+	}
 
+	nput, err := f.hdr.Put(b)
+	if err != nil {
+		return n, err
+	}
+	nw, err := w.Write(b[:nput])
+	n += int64(nw)
+	if err != nil {
+		return n, err
+	} else if nw != nput {
+		return n, io.ErrShortWrite
+	}
+	if err != nil {
+		return 0, err
+	}
+	// We define our ELF layout here.
+	phtotsize := int64(f.hdr.Phentsize) * int64(f.hdr.Phnum)
+	shtotsize := int64(f.hdr.Shentsize) * int64(f.hdr.Shnum)
+
+	phOff := n
+	shOff := phOff + phtotsize
+	_ = shtotsize
+	_ = shOff
+	// And now we consolidate
+	bo := f.hdr.ByteOrder()
+	for i := range f.progs {
+		p := &f.progs[i]
+		nput, err = p.ProgHeader.Put(b, f.hdr.Class, bo)
+		if err != nil {
+			return n, err
+		}
+		nw, err := w.Write(b[:nput])
+		n += int64(nw)
+		if err != nil {
+			return n, err
+		} else if nw != nput {
+			return n, io.ErrShortWrite
+		}
+	}
+	for i := range f.sections {
+		s := &f.sections[i]
+		nput, err = s.SectionHeader.Put(b, f.hdr.Class, bo)
+		if err != nil {
+			return n, err
+		}
+		nw, err := w.Write(b[:nput])
+		n += int64(nw)
+		if err != nil {
+			return n, err
+		} else if nw != nput {
+			return n, io.ErrShortWrite
+		}
+	}
 	return 0, nil
+}
+
+func (f *File) Header() Header {
+	return f.hdr
+}
+
+func (f *File) Prog(progIdx int) (ProgSection, error) {
+	if progIdx >= len(f.sections) || progIdx < 0 {
+		return ProgSection{}, errors.New("OOB/negative prog index")
+	}
+	return ProgSection{
+		f:      f,
+		pindex: progIdx,
+	}, nil
 }
 
 func (f *File) Section(sectionIdx int) (FileSection, error) {
@@ -162,7 +238,8 @@ func (f *File) Section(sectionIdx int) (FileSection, error) {
 }
 
 func (f *File) SectionByName(name string) (FileSection, error) {
-	for i := 0; i < f.NumSections(); i++ {
+	nsect := f.NumSections()
+	for i := 0; i < nsect; i++ {
 		s, err := f.Section(i)
 		if err != nil {
 			return FileSection{}, err
@@ -188,6 +265,16 @@ func (fs FileSection) ptr() *section {
 	return &fs.f.sections[fs.sindex]
 }
 
+// SectionHeader returns the section's header.
+func (fs FileSection) SectionHeader() SectionHeader {
+	return fs.ptr().SectionHeader
+}
+
+// Size returns the size of the ELF section body after decompression in bytes.
+func (fs FileSection) Size() int64 {
+	return int64(fs.ptr().FileSize) // TODO:calculate uncompressed size.
+}
+
 func (fs FileSection) AppendName(dst []byte) (_ []byte, err error) {
 	return fs.f.appendTableStr(dst, int(fs.ptr().Name))
 }
@@ -200,33 +287,75 @@ func (fs FileSection) Name() (string, error) {
 	return string(str), nil
 }
 
-func (fs FileSection) Header() SectionHeader {
-	return fs.ptr().SectionHeader
+// Open returns a new [io.ReadSeeker] reading the ELF section body.
+func (fs FileSection) Open() io.ReadSeeker {
+	s := fs.ptr()
+	if s.Type == SecTypeNobits {
+		return io.NewSectionReader(&nobitsSectionReader{}, 0, int64(s.FileSize))
+	} else if s.Flags&SectionFlag(secFlagCompressed) != 0 {
+		return io.NewSectionReader(&unsupportedCompressionReader{}, 0, int64(s.FileSize))
+	}
+	return io.NewSectionReader(&s.sr, 0, 1<<63-1)
 }
 
-func (fs FileSection) Size() int64 {
-	return int64(fs.ptr().FileSize) // For now returns uncompressed size.
+// AppendData appends the section's body to the dst buffer and returns the result.
+// AppendData always
+func (fs FileSection) AppendData(dst []byte) (_ []byte, err error) {
+	s := fs.ptr()
+	if s.Type == SecTypeNobits {
+		return dst, errReadFromNobits
+	} else if s.Flags&SectionFlag(secFlagCompressed) != 0 {
+		return dst, errCompressionUnsupported
+	}
+	sz := fs.Size()
+	if sz == 0 {
+		return dst, nil
+	}
+	if sliceCapWithSize(1, uint64(sz)) < 0 || sz+int64(len(dst)) > math.MaxInt {
+		return dst, errors.New("section too large")
+	}
+	dst = slicesGrow(dst, int(sz))
+	toRead := dst[len(dst) : len(dst)+int(sz)]
+
+	result, err := fs.readAt(toRead, 0)
+	if err != nil {
+		return dst, err
+	} else if len(result) != len(toRead) {
+		return dst, fmt.Errorf("short section read sz=%d sr=%d read=%d", sz, s.sr.Size(), len(result))
+	}
+	dst = dst[:len(dst)+int(sz)]
+	return dst, nil
 }
+
+type ProgSection struct {
+	f      *File
+	pindex int
+}
+
+func (ps ProgSection) ptr() *prog {
+	return &ps.f.progs[ps.pindex]
+}
+
+// ProgHeader returns the program's header.
+func (ps ProgSection) ProgHeader() ProgHeader {
+	return ps.ptr().ProgHeader
+}
+
+// Size returns the size of the ELF program body after decompression in bytes.
+func (ps ProgSection) Size() int64 {
+	return int64(ps.ptr().Filesz) // TODO:calculate uncompressed size.
+}
+
+// Open returns a new [io.ReadSeeker] reading the ELF program body.
+func (ps ProgSection) Open() io.ReadSeeker { return io.NewSectionReader(&ps.ptr().sr, 0, 1<<63-1) }
 
 // readAt returns a buffer with fileSection contents with the underlying File's buffer.
-func (fs FileSection) readAt(length int, offset int64) ([]byte, error) {
+func (fs FileSection) readAt(buf []byte, offset int64) ([]byte, error) {
 	s := fs.ptr()
-	if length > len(fs.f.buf) {
-		return nil, errors.New("length larger than file buffer")
-	} else if offset >= int64(s.FileSize) {
-		return nil, io.EOF
+	if s.Type == SecTypeNobits {
+		return nil, errReadFromNobits
 	}
-	end := int64(length) + offset
-	if end > int64(s.FileSize) {
-		// Limit read size to size of section.
-		length -= int(end - int64(s.FileSize))
-	}
-
-	n, err := s.sr.ReadAt(fs.f.buf[:length], offset)
-	if err != nil {
-		return nil, err
-	}
-	return fs.f.buf[:n], nil
+	return readSRInto(buf, &s.sr, offset)
 }
 
 func (f *File) appendTableStr(dst []byte, start int) ([]byte, error) {
@@ -254,7 +383,7 @@ func (fs FileSection) appendStr(dst []byte, start int) ([]byte, error) {
 	if start < 0 || int64(start) >= fs.Size() {
 		return dst, errors.New("bad section header name value")
 	}
-	secData, err := fs.readAt(fileBufSize, int64(start))
+	secData, err := fs.readAt(fs.f.buf[:], int64(start))
 	if err != nil {
 		return dst, err
 	}
@@ -263,4 +392,41 @@ func (fs FileSection) appendStr(dst []byte, start int) ([]byte, error) {
 		return dst, errors.New("name too long or bad data")
 	}
 	return append(dst, secData[:strEnd]...), nil
+}
+
+func readSRInto(buf []byte, sr *io.SectionReader, offset int64) ([]byte, error) {
+	if len(buf) == 0 {
+		return nil, nil
+	}
+	sz := sr.Size()
+	end := int64(len(buf)) + offset
+	if offset > sr.Size() {
+		return nil, io.EOF
+	}
+	if end > sz {
+		buf = buf[:len(buf)-int(end-sz)]
+	}
+	n, err := sr.ReadAt(buf, offset)
+	if err != nil {
+		if err != io.EOF {
+			return nil, err
+		} else if n == 0 {
+			return nil, io.EOF
+		} else if n < len(buf) {
+			err = io.ErrNoProgress
+		}
+	}
+	return buf[:n], err
+}
+
+type nobitsSectionReader struct{}
+
+func (*nobitsSectionReader) ReadAt(p []byte, off int64) (n int, err error) {
+	return 0, errReadFromNobits
+}
+
+type unsupportedCompressionReader struct{}
+
+func (*unsupportedCompressionReader) ReadAt(p []byte, off int64) (n int, err error) {
+	return 0, errCompressionUnsupported
 }

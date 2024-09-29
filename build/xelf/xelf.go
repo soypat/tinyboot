@@ -100,7 +100,9 @@ const (
 )
 
 var (
-	errInvalidClass = errors.New("invalid ELF class")
+	errCompressionUnsupported = errors.New("compression type unsupported")
+	errInvalidClass           = errors.New("invalid ELF class")
+	errReadFromNobits         = errors.New("unexpected read from SHT_NOBITS section")
 )
 
 type Header struct {
@@ -167,6 +169,9 @@ func (h Header) Validate() (err error) {
 	}
 	if h.Shnum > 0 && h.Shentsize < wantShentSize {
 		err = errors.Join(err, makeFormatErr(0, "invalid shentsize", h.Phentsize))
+	}
+	if h.Class == Class32 {
+		// TODO: add 32bit overflows.
 	}
 	return err
 }
@@ -284,6 +289,17 @@ func (h Header) Put(b []byte) (n int, err error) {
 	return n, nil
 }
 
+func (h Header) HeaderSize() int {
+	switch h.Class {
+	case Class32:
+		return headerSize32
+	case Class64:
+		return headerSize64
+	default:
+		return -1
+	}
+}
+
 type ProgFlag uint32
 
 type ProgHeader struct {
@@ -365,6 +381,28 @@ func (ph ProgHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, err
 	return n, nil
 }
 
+func (ph ProgHeader) HeaderSize(class Class) int {
+	switch class {
+	case Class32:
+		return progHeaderSize32
+	case Class64:
+		return progHeaderSize64
+	default:
+		return -1
+	}
+}
+
+func (ph SectionHeader) HeaderSize(class Class) int {
+	switch class {
+	case Class32:
+		return sectionHeaderSize32
+	case Class64:
+		return sectionHeaderSize64
+	default:
+		return -1
+	}
+}
+
 func (ph ProgHeader) Validate(class Class) (err error) {
 	if ph.Off > math.MaxInt64 {
 		err = errors.Join(err, errors.New("program header offset overflows int64"))
@@ -380,7 +418,7 @@ func (ph ProgHeader) Validate(class Class) (err error) {
 
 type prog struct {
 	ProgHeader
-	r io.SectionReader
+	sr io.SectionReader
 }
 
 func makeFormatErr(off uint64, msg string, val any) error {
