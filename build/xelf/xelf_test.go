@@ -125,16 +125,17 @@ func testFile(t *testing.T, r io.ReaderAt, wantSecs int) *File {
 			t.Error("size mismatch for uncompressed file")
 		}
 	}
+
 	syms, err := f.AppendTableSymbols(nil)
 	if err != nil {
 		t.Error("querying symbols", err)
 	}
 
 	for _, sym := range syms {
-		str, err := f.AppendTableStr(nil, sym.Name)
+		str, err := f.AppendSymStr(nil, sym.Name)
 		if err != nil {
 			// Go standard library ignores errors in querying invalid strings.
-			t.Logf("symbol name unable to be queried: %s", err)
+			t.Fatalf("symbol name unable to be queried: %s", err)
 		} else if len(str) > 0 {
 			t.Logf("symbol %q", str)
 		}

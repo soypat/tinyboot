@@ -181,6 +181,10 @@ func applyRelocationsAMD64(dst []byte, relas []byte, syms []Sym, bo binary.ByteO
 	return nil
 }
 
+// AppendTableSymbols appends the symbol table entities to the argument buffer and returns the result.
+// It performs no I/O on the symbol name strings, which can be obtained by calling [File.AppendSymStr].
+//
+//	str, err := f.AppendSymStr(nil, sym.Name)
 func (f *File) AppendTableSymbols(dst []Sym) ([]Sym, error) {
 	return f.appendSymbols(dst, SecTypeSymTab)
 }
@@ -191,13 +195,21 @@ func (f *File) appendSymbols(dst []Sym, typ SectionType) ([]Sym, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errNoSymbols, err)
 	}
+	symtabSh := symtabSection.SectionHeader()
 	data, err := symtabSection.AppendData(nil)
+	symSize := symSize32
+	if class == Class64 {
+		symSize = symSize64
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to load symbol section: %w", err)
 	} else if len(data) == 0 {
 		return nil, errors.New("empty symbol section")
 	} else if (class == Class32 && len(data)%symSize32 != 0) || (class == Class64 && len(data)%symSize64 != 0) {
 		return nil, errors.New("length of symbol section is not a multiple of SymSize")
+	} else if symtabSh.Entsize != uint64(symSize) {
+		return nil, makeFormatErr(symtabSh.Offset, "entsize not match symbol size", symtabSh.Entsize)
 	}
 	bo := f.hdr.ByteOrder()
 
@@ -207,6 +219,7 @@ func (f *File) appendSymbols(dst []Sym, typ SectionType) ([]Sym, error) {
 		return nil, err
 	}
 	data = data[n:]
+
 	for len(data) > 0 {
 		sym, n, err := DecodeSym(data, class, bo)
 		if err != nil {

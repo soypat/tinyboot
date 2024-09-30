@@ -18,14 +18,18 @@ type File struct {
 	buf [fileBufSize]byte
 }
 
+// NumSections returns the number of sections in the ELF binary as specified by the ELF header.
 func (f *File) NumSections() int {
 	return int(f.hdr.Shnum)
 }
 
+// NumProgs returns the number of prog segments in the ELF binary as specified by the ELF header.
 func (f *File) NumProgs() int {
 	return int(f.hdr.Phnum)
 }
 
+// Read parses the underlying ELF file in r. It reads only the main ELF, section and prog segment headers.
+// The ELF binary is expected to start at position 0 in the ReaderAt.
 func (f *File) Read(r io.ReaderAt) error {
 	buf := f.buf[:]
 	if _, err := r.ReadAt(buf[:64], 0); err != nil {
@@ -213,6 +217,7 @@ func (f *File) WriteTo(w io.Writer) (n int64, err error) {
 	return 0, nil
 }
 
+// Header returns the ELF header.
 func (f *File) Header() Header {
 	return f.hdr
 }
@@ -349,6 +354,7 @@ func (fs FileSection) AppendData(dst []byte) (_ []byte, err error) {
 	return dst, nil
 }
 
+// FileProg is a handle to a prog segment in an ELF binary.
 type FileProg struct {
 	f      *File
 	pindex int
@@ -358,14 +364,14 @@ func (fp FileProg) ptr() *prog {
 	return &fp.f.progs[fp.pindex]
 }
 
-// ProgHeader returns the program's header.
+// ProgHeader returns the program segment's header.
 func (fp FileProg) ProgHeader() ProgHeader {
 	return fp.ptr().ProgHeader
 }
 
 // Size returns the size of the ELF program body after decompression in bytes.
 func (fp FileProg) Size() int64 {
-	return int64(fp.ptr().SizeOnFile) // TODO:calculate uncompressed size.
+	return int64(fp.ptr().SizeOnFile) // Prog segments are never compressed.
 }
 
 // Open returns a new [io.ReadSeeker] reading the ELF program body.
@@ -433,6 +439,21 @@ func (f FileSection) String() string {
 	return fmt.Sprintf("%s, %s addr=%#x size=%d", name, hdr.Type.String(), hdr.Addr, f.Size())
 }
 
+// AppendSymStr gets the null-terminated string starting at symName in the first SymbolTable section and appends it to dst and returns the result.
+func (f *File) AppendSymStr(dst []byte, symName uint32) ([]byte, error) {
+	symTab, err := f.SectionByType(SecTypeSymTab)
+	if err != nil {
+		return nil, err
+	}
+	symtabSh := symTab.SectionHeader()
+	strTab, err := f.Section(int(symtabSh.Link))
+	if err != nil {
+		return nil, err
+	}
+	return strTab.appendStr(dst, int64(symName))
+}
+
+// AppendTableStr gets the null-terminated string starting at start in the ELF string table and appends it to dst and returns the result.
 func (f *File) AppendTableStr(dst []byte, start uint32) ([]byte, error) {
 	strndx := int(f.hdr.Shstrndx)
 	if strndx == 0 {
