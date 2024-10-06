@@ -154,69 +154,6 @@ func (f *File) Read(r io.ReaderAt) error {
 	return nil
 }
 
-func (f *File) WriteTo(w io.Writer) (n int64, err error) {
-	return n, errors.ErrUnsupported
-	b := f.buf[:]
-	err = f.hdr.Validate()
-	if err != nil {
-		return 0, err
-	}
-
-	nput, err := f.hdr.Put(b)
-	if err != nil {
-		return n, err
-	}
-	nw, err := w.Write(b[:nput])
-	n += int64(nw)
-	if err != nil {
-		return n, err
-	} else if nw != nput {
-		return n, io.ErrShortWrite
-	}
-	if err != nil {
-		return 0, err
-	}
-	// We define our ELF layout here.
-	phtotsize := int64(f.hdr.Phentsize) * int64(f.hdr.Phnum)
-	shtotsize := int64(f.hdr.Shentsize) * int64(f.hdr.Shnum)
-
-	phOff := n
-	shOff := phOff + phtotsize
-	_ = shtotsize
-	_ = shOff
-	// And now we consolidate
-	bo := f.hdr.ByteOrder()
-	for i := range f.progs {
-		p := &f.progs[i]
-		nput, err = p.ProgHeader.Put(b, f.hdr.Class, bo)
-		if err != nil {
-			return n, err
-		}
-		nw, err := w.Write(b[:nput])
-		n += int64(nw)
-		if err != nil {
-			return n, err
-		} else if nw != nput {
-			return n, io.ErrShortWrite
-		}
-	}
-	for i := range f.sections {
-		s := &f.sections[i]
-		nput, err = s.SectionHeader.Put(b, f.hdr.Class, bo)
-		if err != nil {
-			return n, err
-		}
-		nw, err := w.Write(b[:nput])
-		n += int64(nw)
-		if err != nil {
-			return n, err
-		} else if nw != nput {
-			return n, io.ErrShortWrite
-		}
-	}
-	return 0, nil
-}
-
 // Header returns the ELF header.
 func (f *File) Header() Header {
 	return f.hdr

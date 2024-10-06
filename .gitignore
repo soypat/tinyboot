@@ -23,6 +23,7 @@ picobin
 !cmd/picobin
 !boot/picobin
 !testdata/blink.elf
+!testdata/helloc.elf
 # IDE
 .vscode/
 

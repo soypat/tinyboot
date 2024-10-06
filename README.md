@@ -14,7 +14,7 @@ go mod download github.com/soypat/tinyboot@latest
 ## Package layout
 There are two main top level packages:
 - [`boot`](./boot): Concerns storage formats for booting a computer such as MBT, GPT and Raspberry Pi's picobin format.
-    - [`boot/mbt`](./boot/mbt): Master Boot Record Partition Table interfacing.
+    - [`boot/mbr`](./boot/mbr): Master Boot Record Partition Table interfacing.
     - [`boot/gpt`](./boot/gpt): GUID Partition Table interfacing.
     - [`boot/picobin`](./boot/picobin): Raspberry Pi's bootable format for RP2350 and RP2040.
 
