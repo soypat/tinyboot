@@ -7,6 +7,31 @@ import (
 	"testing"
 )
 
+func TestFile_pca10040_ROM(t *testing.T) {
+	fp, err := os.Open("../../testdata/pca10040-blinky.elf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := testFile(t, fp, 30)
+	var hasProg bool
+	for i := 0; i < file.NumSections(); i++ {
+		sec, err := file.Section(i)
+		if err != nil {
+			t.Fatal(err)
+		}
+		progalloc := sec.IsProgAlloc()
+		if !progalloc {
+			continue
+		}
+		// name, _ := sec.Name()
+		// fmt.Println(i, sec.String())
+		hasProg = hasProg || progalloc
+	}
+	if !hasProg {
+		t.Fatal("no prog memory")
+	}
+}
+
 func TestFile_Read_blink(t *testing.T) {
 	fp, err := os.Open("../../testdata/blink.elf")
 	if err != nil {

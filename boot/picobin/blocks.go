@@ -8,7 +8,7 @@ import (
 	"math"
 )
 
-//go:generate stringer -type="ImageType,ExeCPU,ExeChip,ExeSec,ItemType" -linecomment -output stringers.go .
+//go:generate stringer -type=ImageType,ExeCPU,ExeChip,ExeSec,ItemType -linecomment -output stringers.go .
 
 // Block delimiters. Are encoded as little endian like all picobin data. They were chosen to be numbers that were very unlikely to appear in ARM machine code.
 const (

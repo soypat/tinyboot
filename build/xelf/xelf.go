@@ -567,9 +567,6 @@ func (sh SectionHeader) Validate(class Class) (err error) {
 		if sh.Flags > math.MaxUint32 {
 			err = errors.Join(err, errors.New("section header flags overflow (Class32)"))
 		}
-		if sh.Type > math.MaxUint32 {
-			err = errors.Join(err, errors.New("section header type overflow (Class32)"))
-		}
 	}
 	return err
 }

@@ -24,6 +24,7 @@ picobin
 !boot/picobin
 !testdata/blink.elf
 !testdata/helloc.elf
+!testdata/pca10040-blinky.elf
 # IDE
 .vscode/
 
