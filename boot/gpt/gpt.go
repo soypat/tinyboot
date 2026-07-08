@@ -13,13 +13,15 @@ import (
 const (
 	pteNameOff = 56
 	pteNameLen = 72
+	// Signature is the expected value of a GPT Header signature in little-endian (LE).
+	Signature = 0x5452415020494645
 )
 
 type Header struct {
 	data []byte
 }
 
-func ToHeader(start []byte) (Header, error) {
+func HeaderFromBytes(start []byte) (Header, error) {
 	if len(start) < 92 {
 		return Header{}, errors.New("gpt header too short")
 	}
@@ -231,10 +233,12 @@ func (p PartitionEntry) SetAttributes(attr PartitionAttributes) {
 // encodes it as utf-8 into the provided slice. The number of bytes
 // read is returned along with any error.
 func (p PartitionEntry) ReadNameAsUTF8(b []byte) (int, error) {
-	// Find the length of the name.
+	// Find the length of the name by scanning UTF-16 code units until a NUL
+	// terminator. A byte-wise scan would stop early on the zero high byte of
+	// ASCII characters encoded as UTF-16.
 	nameLen := 0
-	for nameLen < pteNameLen && p.data[pteNameOff+nameLen] != 0 {
-		nameLen++
+	for nameLen+1 < pteNameLen && (p.data[pteNameOff+nameLen] != 0 || p.data[pteNameOff+nameLen+1] != 0) {
+		nameLen += 2
 	}
 
 	n, err := utf16x.ToUTF8(b, p.data[pteNameOff:pteNameOff+nameLen], binary.LittleEndian)
