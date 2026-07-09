@@ -18,10 +18,11 @@ const _Class_name = "unknown class32-bit architecture64-bit architecture"
 var _Class_index = [...]uint8{0, 13, 32, 51}
 
 func (i Class) String() string {
-	if i >= Class(len(_Class_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_Class_index)-1 {
 		return "Class(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _Class_name[_Class_index[i]:_Class_index[i+1]]
+	return _Class_name[_Class_index[idx]:_Class_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -118,10 +119,11 @@ const _Data_name = "unknown data format2's complement little-endian2's complemen
 var _Data_index = [...]uint8{0, 19, 47, 72}
 
 func (i Data) String() string {
-	if i >= Data(len(_Data_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_Data_index)-1 {
 		return "Data(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _Data_name[_Data_index[i]:_Data_index[i+1]]
+	return _Data_name[_Data_index[idx]:_Data_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -824,11 +826,11 @@ const _NType_name = "Process statusFloating point registersProcess state info"
 var _NType_index = [...]uint8{0, 14, 38, 56}
 
 func (i NType) String() string {
-	i -= 1
-	if i < 0 || i >= NType(len(_NType_index)-1) {
-		return "NType(" + strconv.FormatInt(int64(i+1), 10) + ")"
+	idx := int(i) - 1
+	if i < 1 || idx >= len(_NType_index)-1 {
+		return "NType(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _NType_name[_NType_index[i]:_NType_index[i+1]]
+	return _NType_name[_NType_index[idx]:_NType_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -924,10 +926,11 @@ const _SymVis_name = "Default visibility (see binding)Internal: Special meaning 
 var _SymVis_index = [...]uint8{0, 32, 80, 99, 137}
 
 func (i SymVis) String() string {
-	if i < 0 || i >= SymVis(len(_SymVis_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_SymVis_index)-1 {
 		return "SymVis(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _SymVis_name[_SymVis_index[i]:_SymVis_index[i+1]]
+	return _SymVis_name[_SymVis_index[idx]:_SymVis_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -1072,10 +1075,11 @@ const _RX86_64_name = "No relocationAdd 64 bit symbol valuePC-relative 32 bit si
 var _RX86_64_index = [...]uint16{0, 13, 36, 71, 100, 129, 157, 186, 215, 248, 285, 322, 359, 396, 447, 483, 533, 563, 582, 608, 642, 676, 695, 729, 755, 800, 808, 815, 820, 830, 837, 845, 853, 859, 865, 880, 892, 899, 908, 918, 926, 935, 944, 957}
 
 func (i RX86_64) String() string {
-	if i < 0 || i >= RX86_64(len(_RX86_64_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_RX86_64_index)-1 {
 		return "RX86_64(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _RX86_64_name[_RX86_64_index[i]:_RX86_64_index[i+1]]
+	return _RX86_64_name[_RX86_64_index[idx]:_RX86_64_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -1393,10 +1397,11 @@ const _RAlpha_name = "No relocationDirect 32 bitDirect 64 bitGP relative 32 bitG
 var _RAlpha_index = [...]uint16{0, 13, 26, 39, 57, 90, 119, 141, 169, 197, 215, 233, 251, 264, 286, 303, 323, 330, 339, 347, 358, 371, 385, 398, 408, 430, 446, 462, 484}
 
 func (i RAlpha) String() string {
-	if i < 0 || i >= RAlpha(len(_RAlpha_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_RAlpha_index)-1 {
 		return "RAlpha(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _RAlpha_name[_RAlpha_index[i]:_RAlpha_index[i+1]]
+	return _RAlpha_name[_RAlpha_index[idx]:_RAlpha_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -1713,10 +1718,11 @@ const _R390_name = "None8121632PC32GOT12GOT32PLT32COPYGLOB_DATJMP_SLOTRELATIVEGO
 var _R390_index = [...]uint16{0, 4, 5, 7, 9, 11, 15, 20, 25, 30, 34, 42, 50, 58, 64, 69, 74, 78, 85, 93, 100, 108, 116, 118, 122, 127, 132, 138, 146, 154, 162, 170, 178, 186, 195, 206, 217, 228, 236, 246, 256, 264, 272, 283, 294, 305, 314, 323, 331, 339, 348, 356, 364, 373, 382, 392, 402, 411, 413, 418, 426, 437}
 
 func (i R390) String() string {
-	if i < 0 || i >= R390(len(_R390_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_R390_index)-1 {
 		return "R390(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _R390_name[_R390_index[i]:_R390_index[i+1]]
+	return _R390_name[_R390_index[idx]:_R390_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -2390,8 +2396,9 @@ const _RSPARC_name = "None81632DISP8DISP16DISP32WDISP30WDISP22HI222213LO10GOT10G
 var _RSPARC_index = [...]uint16{0, 4, 5, 7, 9, 14, 20, 26, 33, 40, 44, 46, 48, 52, 57, 62, 67, 71, 75, 81, 85, 93, 101, 109, 113, 118, 125, 132, 139, 146, 153, 155, 157, 159, 164, 168, 172, 176, 183, 190, 197, 204, 211, 219, 220, 221, 222, 228, 233, 238, 243, 246, 249, 252, 260, 264, 268}
 
 func (i RSPARC) String() string {
-	if i < 0 || i >= RSPARC(len(_RSPARC_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_RSPARC_index)-1 {
 		return "RSPARC(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _RSPARC_name[_RSPARC_index[i]:_RSPARC_index[i+1]]
+	return _RSPARC_name[_RSPARC_index[idx]:_RSPARC_index[idx+1]]
 }

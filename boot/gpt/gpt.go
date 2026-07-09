@@ -6,13 +6,15 @@ package gpt
 import (
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 
 	"github.com/soypat/tinyboot/internal/utf16x"
 )
 
 const (
-	pteNameOff = 56
-	pteNameLen = 72
+	headerMinSize = 92
+	pteNameOff    = 56
+	pteNameLen    = 72
 	// Signature is the expected value of a GPT Header signature in little-endian (LE).
 	Signature = 0x5452415020494645
 )
@@ -22,11 +24,11 @@ type Header struct {
 }
 
 func HeaderFromBytes(start []byte) (Header, error) {
-	if len(start) < 92 {
+	if len(start) < headerMinSize {
 		return Header{}, errors.New("gpt header too short")
 	}
 	h := Header{
-		data: start[:92:92],
+		data: start[:headerMinSize:headerMinSize],
 	}
 	return h, nil
 }
@@ -60,6 +62,18 @@ func (h Header) CRC() uint32 {
 // SetCRC sets the CRC32 of the GPT header.
 func (h Header) SetCRC(crc uint32) {
 	binary.LittleEndian.PutUint32(h.data[16:20], crc)
+}
+
+// CalculateCRC computes the CRC32 (IEEE) of the header as mandated by the GPT
+// specification: over Size() bytes with the CRC field itself zeroed. Compare
+// against CRC to validate a read header, or store via SetCRC after modifying
+// the header.
+func (h Header) CalculateCRC() uint32 {
+	prev := h.CRC()
+	h.SetCRC(0)
+	crc := crc32.ChecksumIEEE(h.data[:min(h.Size(), headerMinSize)])
+	h.SetCRC(prev)
+	return crc
 }
 
 // Bytes 20..24 are reserved and should be zero.
@@ -105,13 +119,13 @@ func (h Header) SetLastUsableLBA(lba int64) {
 }
 
 // DiskGUID returns the GUID of the disk.
-func (h Header) DiskGUID() (guid [16]byte) {
+func (h Header) DiskGUID() (guid GUID) {
 	copy(guid[:], h.data[56:72])
 	return guid
 }
 
 // SetDiskGUID sets the GUID of the disk.
-func (h Header) SetDiskGUID(guid [16]byte) {
+func (h Header) SetDiskGUID(guid GUID) {
 	copy(h.data[56:72], guid[:])
 }
 
@@ -165,7 +179,7 @@ type PartitionEntry struct {
 
 type PartitionAttributes uint64
 
-func ToPartitionEntry(start []byte) (PartitionEntry, error) {
+func PartitionEntryFromBytes(start []byte) (PartitionEntry, error) {
 	if len(start) < 128 {
 		return PartitionEntry{}, errors.New("gpt partition entry too short")
 	}
@@ -176,24 +190,24 @@ func ToPartitionEntry(start []byte) (PartitionEntry, error) {
 }
 
 // PartitionTypeGUID returns the GUID of the partition type.
-func (p PartitionEntry) PartitionTypeGUID() (guid [16]byte) {
+func (p PartitionEntry) PartitionTypeGUID() (guid GUID) {
 	copy(guid[:], p.data[0:16])
 	return
 }
 
 // SetPartitionTypeGUID sets the GUID of the partition type.
-func (p PartitionEntry) SetPartitionTypeGUID(guid [16]byte) {
+func (p PartitionEntry) SetPartitionTypeGUID(guid GUID) {
 	copy(p.data[0:16], guid[:])
 }
 
 // UniquePartitionGUID returns the GUID of the partition.
-func (p PartitionEntry) UniquePartitionGUID() (guid [16]byte) {
+func (p PartitionEntry) UniquePartitionGUID() (guid GUID) {
 	copy(guid[:], p.data[16:32])
 	return
 }
 
 // SetUniquePartitionGUID sets the GUID of the partition.
-func (p PartitionEntry) SetUniquePartitionGUID(guid [16]byte) {
+func (p PartitionEntry) SetUniquePartitionGUID(guid GUID) {
 	copy(p.data[16:32], guid[:])
 }
 

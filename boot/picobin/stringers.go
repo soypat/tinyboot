@@ -18,10 +18,11 @@ const _ImageType_name = "invalidexecutabledata"
 var _ImageType_index = [...]uint8{0, 7, 17, 21}
 
 func (i ImageType) String() string {
-	if i >= ImageType(len(_ImageType_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_ImageType_index)-1 {
 		return "ImageType(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _ImageType_name[_ImageType_index[i]:_ImageType_index[i+1]]
+	return _ImageType_name[_ImageType_index[idx]:_ImageType_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -36,10 +37,11 @@ const _ExeCPU_name = "ARMRISCV"
 var _ExeCPU_index = [...]uint8{0, 3, 8}
 
 func (i ExeCPU) String() string {
-	if i >= ExeCPU(len(_ExeCPU_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_ExeCPU_index)-1 {
 		return "ExeCPU(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _ExeCPU_name[_ExeCPU_index[i]:_ExeCPU_index[i+1]]
+	return _ExeCPU_name[_ExeCPU_index[idx]:_ExeCPU_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -54,10 +56,11 @@ const _ExeChip_name = "RP2040RP2350"
 var _ExeChip_index = [...]uint8{0, 6, 12}
 
 func (i ExeChip) String() string {
-	if i >= ExeChip(len(_ExeChip_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_ExeChip_index)-1 {
 		return "ExeChip(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _ExeChip_name[_ExeChip_index[i]:_ExeChip_index[i+1]]
+	return _ExeChip_name[_ExeChip_index[idx]:_ExeChip_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -72,10 +75,11 @@ const _ExeSec_name = "Non-SecureSecure"
 var _ExeSec_index = [...]uint8{0, 10, 16}
 
 func (i ExeSec) String() string {
-	if i >= ExeSec(len(_ExeSec_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_ExeSec_index)-1 {
 		return "ExeSec(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _ExeSec_name[_ExeSec_index[i]:_ExeSec_index[i+1]]
+	return _ExeSec_name[_ExeSec_index[idx]:_ExeSec_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.

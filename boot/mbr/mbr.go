@@ -8,6 +8,38 @@ import (
 	"errors"
 )
 
+//go:generate stringer -type PartitionType -linecomment -output stringers.go
+
+// PartitionType refers to the type of partition the Partition Table Entry refers to.
+type PartitionType byte
+
+const (
+	PartitionTypeUnused        PartitionType = 0x00 // unused
+	PartitionTypeFAT12         PartitionType = 0x01 // fat12
+	PartitionTypeFAT16Small    PartitionType = 0x04 // fat16 <32MB
+	PartitionTypeExtended      PartitionType = 0x05 // extended
+	PartitionTypeFAT16         PartitionType = 0x06 // fat16
+	PartitionTypeNTFS          PartitionType = 0x07 // ntfs/exfat
+	PartitionTypeFAT32CHS      PartitionType = 0x0B // fat32-chs
+	PartitionTypeFAT32LBA      PartitionType = 0x0C // fat32-lba
+	PartitionTypeFAT16LBA      PartitionType = 0x0E // fat16-lba
+	PartitionTypeExtendedLBA   PartitionType = 0x0F // extended-lba
+	PartitionTypeWindowsRE     PartitionType = 0x27 // windows-recovery
+	PartitionTypeLinuxSwap     PartitionType = 0x82 // linux-swap
+	PartitionTypeLinux         PartitionType = 0x83 // linux
+	PartitionTypeLinuxExtended PartitionType = 0x85 // linux-extended
+	PartitionTypeLinuxLVM      PartitionType = 0x8E // linux-lvm
+	PartitionTypeFreeBSD       PartitionType = 0xA5 // freebsd
+	PartitionTypeOpenBSD       PartitionType = 0xA6 // openbsd
+	PartitionTypeNetBSD        PartitionType = 0xA9 // netbsd
+	PartitionTypeAppleBoot     PartitionType = 0xAB // apple-boot
+	PartitionTypeAppleHFS      PartitionType = 0xAF // apple-hfs
+	PartitionTypeSolaris       PartitionType = 0xBF // solaris
+	PartitionTypeGPTProtective PartitionType = 0xEE // gpt-protective
+	PartitionTypeEFISystem     PartitionType = 0xEF // efi-system
+	PartitionTypeLinuxRAID     PartitionType = 0xFD // linux-raid
+)
+
 const (
 	bootstrapLen     = 440
 	uniqueDiskIDOff  = bootstrapLen
@@ -142,24 +174,6 @@ func (chs CHS) Tuple() (cylinder, head, sector uint8) {
 func NewCHS(cylinder, head, sector uint8) CHS {
 	return CHS(cylinder) | CHS(head)<<8 | CHS(sector)<<16
 }
-
-// PartitionType refers to the type of partition the Partition Table Entry refers to.
-type PartitionType byte
-
-const (
-	PartitionTypeUnused   PartitionType = 0x00
-	PartitionTypeFAT12    PartitionType = 0x01
-	PartitionTypeFAT16    PartitionType = 0x04
-	PartitionTypeExtended PartitionType = 0x05
-	PartitionTypeFAT32CHS PartitionType = 0x0B
-	PartitionTypeFAT32LBA PartitionType = 0x0C
-	PartitionTypeNTFS     PartitionType = 0x07 // Also includes exFAT.
-	PartitionTypeLinux    PartitionType = 0x83
-	PartitionTypeFreeBSD  PartitionType = 0xA5
-	PartitionTypeAppleHFS PartitionType = 0xAF
-
-	PartitionTypeGPTProtective PartitionType = 0xEE
-)
 
 // DriveAttributes refers to the first byte of a Partition Table Entry. It specifies
 // if the partition is bootable.
