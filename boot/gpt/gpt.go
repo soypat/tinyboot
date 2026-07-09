@@ -19,10 +19,16 @@ const (
 	Signature = 0x5452415020494645
 )
 
+// Header is a GPT header as stored on disk at the disk's second logical block
+// (and last logical block for the backup copy). It references the original
+// byte slice, so setters modify the underlying buffer.
 type Header struct {
 	data []byte
 }
 
+// HeaderFromBytes converts a byte slice to a GPT Header while maintaining a
+// reference to the original byte slice. The byte slice must be at least 92
+// bytes long and start with the first byte of the header.
 func HeaderFromBytes(start []byte) (Header, error) {
 	if len(start) < headerMinSize {
 		return Header{}, errors.New("gpt header too short")
@@ -177,8 +183,12 @@ type PartitionEntry struct {
 	data []byte
 }
 
+// PartitionAttributes is the 64-bit attribute field of a partition entry.
 type PartitionAttributes uint64
 
+// PartitionEntryFromBytes converts a byte slice to a GPT PartitionEntry while
+// maintaining a reference to the original byte slice. The byte slice must be
+// at least 128 bytes long and start with the first byte of the entry.
 func PartitionEntryFromBytes(start []byte) (PartitionEntry, error) {
 	if len(start) < 128 {
 		return PartitionEntry{}, errors.New("gpt partition entry too short")
@@ -262,6 +272,7 @@ func (p PartitionEntry) ReadNameAsUTF8(b []byte) (int, error) {
 	return n, nil
 }
 
+// ClearName zeros the entire name field of the partition entry.
 func (p PartitionEntry) ClearName() {
 	p.clearNameAfter(0)
 }

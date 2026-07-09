@@ -31,6 +31,7 @@ func (g GUID) String() string {
 	return string(dst[:])
 }
 
+// PutString writes the canonical text form of the GUID to dst, which must be at least 36 bytes long.
 func (g GUID) PutString(dst []byte) {
 	_ = dst[35]
 	i := 0

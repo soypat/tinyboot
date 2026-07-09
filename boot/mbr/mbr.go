@@ -51,10 +51,10 @@ const (
 	BootSignature    = 0xAA55
 )
 
-// ToBootSector converts a byte slice to an MBR BootSector while maintaining a
+// BootSectorFromBytes converts a byte slice to an MBR BootSector while maintaining a
 // reference to the original byte slice. The byte slice must be at least 512
 // bytes long and the first byte of the slice must be the first byte of the MBR.
-func ToBootSector(start []byte) (BootSector, error) {
+func BootSectorFromBytes(start []byte) (BootSector, error) {
 	if len(start) < 512 {
 		return BootSector{}, errors.New("boot sector too short")
 	}
@@ -81,13 +81,24 @@ func (mbr *BootSector) Bootstrap() []byte {
 	return mbr.data[0:bootstrapLen]
 }
 
+// UniqueDiskID returns the 32-bit disk signature used by operating systems to identify the disk.
 func (mbr *BootSector) UniqueDiskID() uint32 {
 	return binary.LittleEndian.Uint32(mbr.data[uniqueDiskIDOff : uniqueDiskIDOff+uniqueDiskIDLen])
+}
+
+// SetUniqueDiskID sets the 32-bit disk signature.
+func (mbr *BootSector) SetUniqueDiskID(id uint32) {
+	binary.LittleEndian.PutUint32(mbr.data[uniqueDiskIDOff:uniqueDiskIDOff+uniqueDiskIDLen], id)
 }
 
 // BootSignature returns the boot signature of the MBR. This is a magic number (0xAA55) that indicates that this is a valid MBR.
 func (mbr *BootSector) BootSignature() uint16 {
 	return binary.LittleEndian.Uint16(mbr.data[bootSignatureOff : bootSignatureOff+2])
+}
+
+// SetBootSignature sets the boot signature of the MBR. Write [BootSignature] (0xAA55) to mark the MBR valid.
+func (mbr *BootSector) SetBootSignature(sig uint16) {
+	binary.LittleEndian.PutUint16(mbr.data[bootSignatureOff:bootSignatureOff+2], sig)
 }
 
 // IsProtectiveMBR returns true if the first partition of the MBR is a GPT protective MBR.
@@ -131,15 +142,30 @@ func (pte *PartitionTableEntry) Attributes() DriveAttributes {
 	return DriveAttributes(pte.data[0])
 }
 
+// SetAttributes sets the attributes of the partition the PTE refers to.
+func (pte *PartitionTableEntry) SetAttributes(attrs DriveAttributes) {
+	pte.data[0] = byte(attrs)
+}
+
 // CHSStart returns the starting sector of the partition in CHS format. Is not used by modern operating systems.
 func (pte *PartitionTableEntry) CHSStart() CHS {
 	return CHS(pte.data[1]) | CHS(pte.data[2])<<8 | CHS(pte.data[3])<<16
 }
 
-// ParitionType returns the type the partition refers to, such as if the partition is
+// SetCHSStart sets the starting sector of the partition in CHS format.
+func (pte *PartitionTableEntry) SetCHSStart(chs CHS) {
+	pte.data[1], pte.data[2], pte.data[3] = chs.Tuple()
+}
+
+// PartitionType returns the type the partition refers to, such as if the partition is
 // formatted as a FAT32, NTFS, exFAT, Linux etc.
 func (pte *PartitionTableEntry) PartitionType() PartitionType {
 	return PartitionType(pte.data[4])
+}
+
+// SetPartitionType sets the type of the partition the PTE refers to.
+func (pte *PartitionTableEntry) SetPartitionType(t PartitionType) {
+	pte.data[4] = byte(t)
 }
 
 // CHSLast returns the last sector of the partition in CHS format.
@@ -147,14 +173,29 @@ func (pte *PartitionTableEntry) CHSLast() CHS {
 	return CHS(pte.data[5]) | CHS(pte.data[6])<<8 | CHS(pte.data[7])<<16
 }
 
+// SetCHSLast sets the last sector of the partition in CHS format.
+func (pte *PartitionTableEntry) SetCHSLast(chs CHS) {
+	pte.data[5], pte.data[6], pte.data[7] = chs.Tuple()
+}
+
 // StartLBA returns the starting sector of the partition in LBA format (logical block address).
 func (pte *PartitionTableEntry) StartLBA() uint32 {
 	return binary.LittleEndian.Uint32(pte.data[8:12])
 }
 
+// SetStartLBA sets the starting sector of the partition in LBA format.
+func (pte *PartitionTableEntry) SetStartLBA(lba uint32) {
+	binary.LittleEndian.PutUint32(pte.data[8:12], lba)
+}
+
 // NumberOfLBA returns the number of sectors (logical block addresses) in the partition.
 func (pte *PartitionTableEntry) NumberOfLBA() uint32 {
 	return binary.LittleEndian.Uint32(pte.data[12:16])
+}
+
+// SetNumberOfLBA sets the number of sectors (logical block addresses) in the partition.
+func (pte *PartitionTableEntry) SetNumberOfLBA(n uint32) {
+	binary.LittleEndian.PutUint32(pte.data[12:16], n)
 }
 
 // IsBootable returns true if the partition the PTE refers to is bootable.
@@ -166,6 +207,7 @@ func (attrs DriveAttributes) IsBootable() bool {
 // in favor of LBA, or Logical Block Addressing.
 type CHS uint32
 
+// Tuple returns the three bytes composing the CHS address as stored in a partition table entry.
 func (chs CHS) Tuple() (cylinder, head, sector uint8) {
 	return uint8(chs), uint8(chs >> 8), uint8(chs >> 16)
 }
