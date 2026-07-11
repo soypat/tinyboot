@@ -1,0 +1,8 @@
+github.com/soypat/fat v0.0.0-20260711164259-762c5d36c261 h1:xTkLeQJ4CYcjnKCWnFQ1dz4ReDMX95KzzRVPiWu2Eho=
+github.com/soypat/fat v0.0.0-20260711164259-762c5d36c261/go.mod h1:6cCZCfoOpl4IbaA4ohTrTYp1ejoUGEoiToDXpXDfAk0=
+github.com/soypat/fat v0.0.0-20260711193954-b2d34be163ac h1:nusAPTBcNrfnEQiXHCVTwMGF3A653obV1HavaM5saLA=
+github.com/soypat/fat v0.0.0-20260711193954-b2d34be163ac/go.mod h1:6cCZCfoOpl4IbaA4ohTrTYp1ejoUGEoiToDXpXDfAk0=
+github.com/soypat/lfs v0.0.0-20260709200648-5c3ec0e7145d h1:UPub1FqIbxlUVWxyRfyZKBx/hsSL9JIqM1Lv8xJ7rj0=
+github.com/soypat/lfs v0.0.0-20260709200648-5c3ec0e7145d/go.mod h1:CZ4ZCLXOApQR+Ga3xpgaSmGHZWGIpeUaBGwFzaySfrA=
+github.com/soypat/lfs v0.0.0-20260711194037-cf300fb86125 h1:NnghIPiUCNS/1e8h6yv/hpbwQzPPhO7ojaQiC3bsVDI=
+github.com/soypat/lfs v0.0.0-20260711194037-cf300fb86125/go.mod h1:CZ4ZCLXOApQR+Ga3xpgaSmGHZWGIpeUaBGwFzaySfrA=
