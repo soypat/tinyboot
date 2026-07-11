@@ -29,7 +29,6 @@
 package filesystem
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -38,84 +37,6 @@ import (
 	"github.com/soypat/fat"
 	"github.com/soypat/lfs"
 )
-
-var (
-	errBadAccessMode   = errors.New("filesystem: invalid access mode, want one of O_RDONLY, O_WRONLY, O_RDWR")
-	errUnsupportedFlag = errors.New("filesystem: unsupported open flag")
-	errExclNoCreate    = errors.New("filesystem: O_EXCL without O_CREATE")
-)
-
-// supportedFlags is the set of os.O_* bits either backend can honor. Any other
-// bit (O_SYNC, O_NOFOLLOW, O_DIRECTORY...) is rejected by the conversion methods
-// rather than silently dropped, so that a caller never believes it got a
-// guarantee the backend cannot provide.
-const supportedFlags = os.O_RDONLY | os.O_WRONLY | os.O_RDWR |
-	os.O_CREATE | os.O_EXCL | os.O_TRUNC | os.O_APPEND
-
-var (
-	_ FileHandle = (*fat.File)(nil)
-	_ FileHandle = (*lfs.File)(nil)
-	_ FileHandle = (*os.File)(nil)
-)
-
-// FileHandle is an open file. Callers own the storage: handles are passed into
-// OpenFile by pointer and filled in, so no allocation occurs on open.
-type FileHandle interface {
-	Close() error
-	Read(buf []byte) (int, error)
-	ReadAt(p []byte, off int64) (int, error)
-	Seek(offset int64, whence int) (int64, error)
-	Sync() error
-	Truncate(size int64) error
-	Write(buf []byte) (int, error)
-	WriteAt(p []byte, off int64) (int, error)
-	WriteString(s string) (int, error)
-}
-
-// DirHandle is an open directory, iterated by callback rather than by returning
-// a slice so that listing a directory does not allocate.
-type DirHandle[I fs.FileInfo] interface {
-	Close() error
-	ForEachFile(cb func(info I) (earlyRetErr error)) error
-}
-
-var (
-	_ FSNoAlloc[*fat.File, *fat.Dir, *fat.FileInfo] = (*FATFS)(nil)
-	_ FSNoAlloc[*lfs.File, *lfs.Dir, *lfs.FileInfo] = (*LittleFS)(nil)
-)
-
-// FSNoAlloc is a mounted filesystem. The directory handle type D is a separate type
-// parameter from the info type I so that OpenDir receives the backend's concrete
-// directory type; taking a DirHandle[I] interface here would force every
-// implementation into a type assertion to recover it.
-//
-// Mounting is not part of this interface: fat and lfs take different geometry
-// (fat needs a sector size, lfs needs a page size and an erase block size), and
-// no useful abstraction spans the two. Mount the native FSNoAlloc, then wrap it.
-type FSNoAlloc[F FileHandle, D DirHandle[I], I fs.FileInfo] interface {
-	// OpenFile mirrors [os.OpenFile]: flag is a bitmask of the os.O_* constants
-	// and perm is ignored (see the package documentation).
-	OpenFile(f F, path string, flag int, perm fs.FileMode) error
-	OpenDir(d D, path string) error
-	Mkdir(path string) error
-	Remove(path string) error
-	Rename(oldpath, newpath string) error
-	Stat(path string, info I) error
-}
-
-// access splits the low two bits of flag, which hold the access mode. os.O_RDONLY
-// is zero, so a flag of 0 means read-only exactly as it does in [os.OpenFile].
-func access(flag int) (read, write bool, err error) {
-	switch flag & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) {
-	case os.O_RDONLY:
-		return true, false, nil
-	case os.O_WRONLY:
-		return false, true, nil
-	case os.O_RDWR:
-		return true, true, nil
-	}
-	return false, false, errBadAccessMode
-}
 
 // Wrapped so that a caller can detect use-after-close with the standard
 // errors.Is(err, fs.ErrClosed), as they would with an *os.File.
@@ -134,10 +55,10 @@ var (
 //
 // FS must not be copied after first use, as it contains a [sync.Pool].
 //
-// Stat is the one operation that must still allocate. An [fs.FileInfo] has no
+// Stat is the one operation that must still allocate. An [FileInfo] has no
 // Close, so nothing can ever hand it back, and there is no safe moment to
 // recycle it.
-type FS[F FileHandle, D DirHandle[I], I fs.FileInfo] struct {
+type FS[F FileHandle, D DirHandle[I], I FileInfo] struct {
 	fs      FSNoAlloc[F, D, I]
 	files   sync.Pool // of *File[F], each with its handle already allocated.
 	dirs    sync.Pool // of *Dir[D, I], likewise.
@@ -150,15 +71,15 @@ type FS[F FileHandle, D DirHandle[I], I fs.FileInfo] struct {
 // parameters appear only inside an interface.
 //
 // Prefer [NewFAT] or [NewLittle], which supply them for you.
-func NewFS[F FileHandle, D DirHandle[I], I fs.FileInfo](
+func NewFS[F FileHandle, D DirHandle[I], I FileInfo](
 	fsys FSNoAlloc[F, D, I],
 	newFile func() F,
 	newDir func() D,
 	newInfo func() I,
 ) *FS[F, D, I] {
 	fsys2 := &FS[F, D, I]{fs: fsys, newInfo: newInfo}
-	fsys2.files.New = func() any { return &File[F]{h: newFile()} }
-	fsys2.dirs.New = func() any { return &Dir[D, I]{h: newDir()} }
+	fsys2.files.New = func() any { return &File{h: newFile()} }
+	fsys2.dirs.New = func() any { return &Dir{h: &dirInterfaced[I]{newI: newInfo, h: newDir()}} }
 	return fsys2
 }
 
@@ -180,22 +101,43 @@ func NewLittle(fsys *LittleFS) *FS[*lfs.File, *lfs.Dir, *lfs.FileInfo] {
 	)
 }
 
+type idir interface {
+	ReadNext() (FileInfo, error)
+	Rewind() error
+	Close() error
+}
+
+type dirInterfaced[I FileInfo] struct {
+	newI func() I
+	h    DirHandle[I]
+}
+
+func (di *dirInterfaced[I]) ReadNext() (FileInfo, error) {
+	v := di.newI()
+	err := di.h.ReadNext(v)
+	return v, err
+}
+
+func (di dirInterfaced[I]) Close() error  { return di.h.Close() }
+func (di dirInterfaced[I]) Rewind() error { return di.h.Rewind() }
+
 // Open opens path for reading.
-func (fsys *FS[F, D, I]) Open(path string) (*File[F], error) {
+func (fsys *FS[F, D, I]) Open(path string) (*File, error) {
 	return fsys.OpenFile(path, os.O_RDONLY, 0)
 }
 
 // Create creates or truncates path and opens it for reading and writing.
-func (fsys *FS[F, D, I]) Create(path string) (*File[F], error) {
+func (fsys *FS[F, D, I]) Create(path string) (*File, error) {
 	return fsys.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 }
 
 // OpenFile opens path with the given os.O_* flags, mirroring [os.OpenFile]. The
 // returned File must be closed; closing it is what returns its handle to the
 // pool. See the backend's flag conversion method for what flag costs there.
-func (fsys *FS[F, D, I]) OpenFile(path string, flag int, perm fs.FileMode) (*File[F], error) {
-	f := fsys.files.Get().(*File[F])
-	err := fsys.fs.OpenFile(f.h, path, flag, perm)
+func (fsys *FS[F, D, I]) OpenFile(path string, flag int, perm fs.FileMode) (*File, error) {
+	f := fsys.files.Get().(*File)
+	fp := f.h.(F)
+	err := fsys.fs.OpenFile(fp, path, flag, perm)
 	if err != nil {
 		// f.pool is still nil, so the handle was never handed out and is safe
 		// to recycle immediately.
@@ -207,9 +149,11 @@ func (fsys *FS[F, D, I]) OpenFile(path string, flag int, perm fs.FileMode) (*Fil
 }
 
 // OpenDir opens path for iteration. The returned Dir must be closed.
-func (fsys *FS[F, D, I]) OpenDir(path string) (*Dir[D, I], error) {
-	d := fsys.dirs.Get().(*Dir[D, I])
-	err := fsys.fs.OpenDir(d.h, path)
+func (fsys *FS[F, D, I]) OpenDir(path string) (*Dir, error) {
+	d := fsys.dirs.Get().(*Dir)
+	di := d.h.(*dirInterfaced[I])
+	dp := di.h.(D)
+	err := fsys.fs.OpenDir(dp, path)
 	if err != nil {
 		fsys.dirs.Put(d)
 		return nil, err
@@ -236,28 +180,24 @@ func (fsys *FS[F, D, I]) Rename(oldpath, newpath string) error {
 	return fsys.fs.Rename(oldpath, newpath)
 }
 
-var _ FileHandle = (*File[*fat.File])(nil)
+var _ FileHandle = (*File)(nil)
 
 // File is an open file handed out by [FS]. Close returns the underlying handle
 // to the pool it came from and poisons this File, so that using it afterwards
 // reports [fs.ErrClosed] instead of operating on a handle that a later Open may
 // already have handed to someone else. That guard is the reason FS hands out a
 // File rather than the backend handle itself.
-type File[F FileHandle] struct {
+type File struct {
 	// pool is non-nil exactly while this File is open, and is the pool to
 	// return h to on Close. It doubles as the open flag.
 	pool *sync.Pool
-	h    F
+	h    FileHandle
 }
-
-// Handle returns the underlying backend handle, for callers that need an
-// operation this wrapper does not forward. It is only valid until Close.
-func (f *File[F]) Handle() F { return f.h }
 
 // Close closes the file and returns its handle to the pool. It is idempotent
 // only in the sense that a second Close reports [fs.ErrClosed]; it never
 // double-frees the handle to the pool.
-func (f *File[F]) Close() error {
+func (f *File) Close() error {
 	if f.pool == nil {
 		return errFileClosed
 	}
@@ -268,56 +208,56 @@ func (f *File[F]) Close() error {
 	return err
 }
 
-func (f *File[F]) Read(buf []byte) (int, error) {
+func (f *File) Read(buf []byte) (int, error) {
 	if f.pool == nil {
 		return 0, errFileClosed
 	}
 	return f.h.Read(buf)
 }
 
-func (f *File[F]) ReadAt(p []byte, off int64) (int, error) {
+func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	if f.pool == nil {
 		return 0, errFileClosed
 	}
 	return f.h.ReadAt(p, off)
 }
 
-func (f *File[F]) Write(buf []byte) (int, error) {
+func (f *File) Write(buf []byte) (int, error) {
 	if f.pool == nil {
 		return 0, errFileClosed
 	}
 	return f.h.Write(buf)
 }
 
-func (f *File[F]) WriteAt(p []byte, off int64) (int, error) {
+func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	if f.pool == nil {
 		return 0, errFileClosed
 	}
 	return f.h.WriteAt(p, off)
 }
 
-func (f *File[F]) WriteString(s string) (int, error) {
+func (f *File) WriteString(s string) (int, error) {
 	if f.pool == nil {
 		return 0, errFileClosed
 	}
 	return f.h.WriteString(s)
 }
 
-func (f *File[F]) Seek(offset int64, whence int) (int64, error) {
+func (f *File) Seek(offset int64, whence int) (int64, error) {
 	if f.pool == nil {
 		return 0, errFileClosed
 	}
 	return f.h.Seek(offset, whence)
 }
 
-func (f *File[F]) Truncate(size int64) error {
+func (f *File) Truncate(size int64) error {
 	if f.pool == nil {
 		return errFileClosed
 	}
 	return f.h.Truncate(size)
 }
 
-func (f *File[F]) Sync() error {
+func (f *File) Sync() error {
 	if f.pool == nil {
 		return errFileClosed
 	}
@@ -326,28 +266,20 @@ func (f *File[F]) Sync() error {
 
 // Dir is an open directory handed out by [FS], with the same close-and-recycle
 // contract as [File].
-type Dir[D DirHandle[I], I fs.FileInfo] struct {
+type Dir struct {
 	pool *sync.Pool
-	h    D
+	h    idir
 }
 
-// Handle returns the underlying backend handle. It is only valid until Close.
-func (d *Dir[D, I]) Handle() D { return d.h }
-
-// ForEachFile calls cb for every entry in the directory.
-//
-// The info passed to cb is owned by the backend and is reused across calls: both
-// fat and lfs pass the same FileInfo every time. Retaining that pointer past the
-// callback leaves you aliasing the next entry, so copy out whatever you need.
-func (d *Dir[D, I]) ForEachFile(cb func(info I) error) error {
-	if d.pool == nil {
-		return errDirClosed
-	}
-	return d.h.ForEachFile(cb)
+func (d *Dir) ReadNext() (FileInfo, error) {
+	return d.h.ReadNext()
+}
+func (d *Dir) Rewind() error {
+	return d.h.Rewind()
 }
 
 // Close closes the directory and returns its handle to the pool.
-func (d *Dir[D, I]) Close() error {
+func (d *Dir) Close() error {
 	if d.pool == nil {
 		return errDirClosed
 	}
