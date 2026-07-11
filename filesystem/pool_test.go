@@ -25,10 +25,10 @@ func TestPoolRecyclesHandles(t *testing.T) {
 	})
 }
 
-func testPoolRecycles[F filesystem.FileHandle](
+func testPoolRecycles(
 	t *testing.T,
-	create func(string) (*filesystem.File[F], error),
-	open func(string) (*filesystem.File[F], error),
+	create func(string) (*filesystem.File, error),
+	open func(string) (*filesystem.File, error),
 ) {
 	t.Helper()
 	f1, err := create("/pooled.txt")
@@ -76,7 +76,7 @@ func TestUseAfterCloseIsSafe(t *testing.T) {
 	})
 }
 
-func testUseAfterClose[F filesystem.FileHandle](t *testing.T, f *filesystem.File[F]) {
+func testUseAfterClose(t *testing.T, f *filesystem.File) {
 	t.Helper()
 	buf := make([]byte, 4)
 	ops := map[string]func() error{
@@ -100,6 +100,40 @@ func testUseAfterClose[F filesystem.FileHandle](t *testing.T, f *filesystem.File
 			t.Errorf("%s on a closed File: error %v does not match fs.ErrClosed", name, err)
 		}
 	}
+}
+
+// TestDirUseAfterCloseIsSafe is the [filesystem.Dir] half of
+// TestUseAfterCloseIsSafe: a recycled directory handle may already belong to
+// another open, so every method on a closed Dir must refuse to reach it.
+func TestDirUseAfterCloseIsSafe(t *testing.T) {
+	test := func(t *testing.T, fsys *filesystem.FS) {
+		if err := fsys.Mkdir("/dir"); err != nil {
+			t.Fatal("mkdir:", err)
+		}
+		d, err := fsys.OpenDir("/dir")
+		if err != nil {
+			t.Fatal("opendir:", err)
+		}
+		if err = d.Close(); err != nil {
+			t.Fatal("close:", err)
+		}
+		ops := map[string]func() error{
+			"ReadNext":    func() error { _, err := d.ReadNext(); return err },
+			"ForEachFile": func() error { return d.ForEachFile(func(filesystem.FileInfo) error { return nil }) },
+			"Rewind":      func() error { return d.Rewind() },
+			"Close":       func() error { return d.Close() },
+		}
+		for name, op := range ops {
+			err := op()
+			if err == nil {
+				t.Errorf("%s on a closed Dir succeeded, want failure", name)
+			} else if !errors.Is(err, fs.ErrClosed) {
+				t.Errorf("%s on a closed Dir: error %v does not match fs.ErrClosed", name, err)
+			}
+		}
+	}
+	t.Run("fat", func(t *testing.T) { test(t, filesystem.NewFAT(newFATFS(t))) })
+	t.Run("lfs", func(t *testing.T) { test(t, filesystem.NewLittle(newLittleFS(t))) })
 }
 
 // TestPoolSteadyStateAllocs checks the payoff: once the pool is warm, an
@@ -138,8 +172,9 @@ func testSteadyStateAllocs(t *testing.T, cycle func()) {
 
 // newFATFS and newLittleFS build a freshly formatted filesystem, mirroring the
 // helpers in generic_test.go but returning the FSNoAlloc implementation so it can
-// be wrapped in a pooled FS.
-func newFATFS(t *testing.T) *filesystem.FATFS {
+// be wrapped in a pooled FS. They take a testing.TB so the benchmarks in
+// bench_test.go can mount with the same geometry the tests use.
+func newFATFS(t testing.TB) *filesystem.FATFS {
 	t.Helper()
 	const sectorSize, sectors = 512, 32000
 	bd := newRamBD(sectorSize, sectors)
@@ -154,7 +189,7 @@ func newFATFS(t *testing.T) *filesystem.FATFS {
 	return fsys
 }
 
-func newLittleFS(t *testing.T) *filesystem.LittleFS {
+func newLittleFS(t testing.TB) *filesystem.LittleFS {
 	t.Helper()
 	const pageSize, blockSize, blocks = 256, 4096, 64
 	bd := newRamBD(pageSize, blockSize/pageSize*blocks)

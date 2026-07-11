@@ -60,7 +60,7 @@ func (bd *ramBD) EraseBlocks(startBlock, numBlocks int64) error {
 // implementations below are the only backend-specific code in this file.
 type backend interface {
 	open(path string, flag int) (filesystem.FileHandle, error)
-	stat(path string) (fs.FileInfo, error)
+	stat(path string) (filesystem.FileInfo, error)
 	mkdir(path string) error
 }
 
@@ -75,7 +75,7 @@ func (b fatBackend) open(path string, flag int) (filesystem.FileHandle, error) {
 	return f, nil
 }
 
-func (b fatBackend) stat(path string) (fs.FileInfo, error) {
+func (b fatBackend) stat(path string) (filesystem.FileInfo, error) {
 	info := new(fat.FileInfo)
 	err := b.fsys.Stat(path, info)
 	if err != nil {
@@ -97,7 +97,7 @@ func (b lfsBackend) open(path string, flag int) (filesystem.FileHandle, error) {
 	return f, nil
 }
 
-func (b lfsBackend) stat(path string) (fs.FileInfo, error) {
+func (b lfsBackend) stat(path string) (filesystem.FileInfo, error) {
 	info := new(lfs.FileInfo)
 	err := b.fsys.Stat(path, info)
 	if err != nil {
@@ -327,7 +327,7 @@ func TestOpenRejectsBadFlags(t *testing.T) {
 
 // TestStatModeAgreesWithIsDir checks the fs.FileMode read back from a Stat is
 // self-consistent, which is what the new lfs.FileInfo.Mode has to guarantee for
-// *lfs.FileInfo to be a usable fs.FileInfo.
+// *lfs.FileInfo to be a usable [filesystem.FileInfo].
 func TestStatModeAgreesWithIsDir(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b backend) {
 		writeFile(t, b, "/file.txt", "x")
