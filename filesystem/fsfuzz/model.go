@@ -89,9 +89,23 @@ type Caps struct {
 	// CaseInsensitive folds names, as FAT does and littlefs does not.
 	CaseInsensitive bool
 
-	// AppendPerWrite is true POSIX append: seek to end before every write.
-	// littlefs does this; FAT seeks to the end once, at open, and a Seek on an
-	// O_APPEND handle therefore sticks. See (*FATFS).mode.
+	// AppendPerWrite is true POSIX append: seek to the end before every write, and
+	// leave the offset alone the rest of the time. littlefs does this natively.
+	//
+	// FAT has no native append that this package can use, so (*FATFS).OpenFile
+	// emulates one by seeking to the end ONCE, at open. That gets a plain
+	// open-and-append right and everything else wrong:
+	//
+	//   - A Seek on an O_APPEND handle sticks, so the next write lands wherever
+	//     the caller seeked instead of at the end.
+	//   - The open-time seek moves the READ offset too. A handle opened
+	//     O_RDONLY|O_APPEND starts at the end of the file and reads EOF, where os
+	//     and littlefs start it at zero and hand back the file. POSIX is explicit
+	//     that O_APPEND governs writes only.
+	//
+	// The second one is a bug, found by the fuzzer and pinned by
+	// TestDivergenceAppendMovesReadOffset. It is modeled rather than quarantined
+	// because this flag already had to exist to describe the first one.
 	AppendPerWrite bool
 
 	// AliasedOpen allows more than one live handle on the same path. littlefs
@@ -143,12 +157,16 @@ type Caps struct {
 	HolesAreGarbage bool
 }
 
-// CapsFAT and CapsLittle describe the two backends this repository ships.
+// CapsFAT and CapsLittle describe the backends this repository ships.
+//
+// CapsFAT covers both FAT32 and exFAT: they are one driver above the FAT itself,
+// and the fuzzer confirms every bug below reproduces identically on both. Long
+// file names cap at 255 on either.
 var (
 	CapsFAT = Caps{
-		MaxNameLen:      255, // exFAT.
+		MaxNameLen:      255,
 		CaseInsensitive: true,
-		AppendPerWrite:  false, // Seeks to end once, at open.
+		AppendPerWrite:  false, // Seeks to end once, at open. See the field: it is a bug.
 
 		SeekBoundedBySize:   true, // BUG, quarantined. See Caps and divergence_test.go.
 		TruncateMovesOffset: true, // BUG, quarantined.
@@ -404,9 +422,13 @@ func (m *model) wantOpen(p string, flag int) (want class, off int64) {
 	if n.exists && !trunc {
 		size = int64(len(n.data))
 	}
-	if flag&os.O_APPEND != 0 {
-		// Both backends position an append handle at the end at open time. Only
-		// littlefs re-seeks before each write; see Caps.AppendPerWrite.
+	if flag&os.O_APPEND != 0 && !m.caps.AppendPerWrite {
+		// FAT has no native append, so (*FATFS).OpenFile emulates it by seeking to
+		// the end once, at open — which moves the READ offset too, and POSIX says
+		// O_APPEND must not. A handle opened O_RDONLY|O_APPEND starts at the end of
+		// the file and reads EOF. os and littlefs both start it at zero and only
+		// move to the end when something writes. See Caps.AppendPerWrite and
+		// TestDivergenceAppendMovesReadOffset.
 		off = size
 	}
 	return classOK, off

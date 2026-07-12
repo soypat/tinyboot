@@ -33,20 +33,51 @@ import (
 //
 // Do not "fix" a failure here by updating the assertion.
 
-// eachPooledFS runs fn against a freshly formatted FAT and littlefs. The devices
-// come from the fsfuzz free list rather than being allocated here, so a test that
-// runs a thousand times does not allocate a thousand devices.
+// eachPooledFS runs fn against every freshly formatted backend. The devices come
+// from the fsfuzz free list rather than being allocated here, so a test that runs
+// a thousand times does not allocate a thousand devices.
 func eachPooledFS(t *testing.T, fn func(t *testing.T, fsys *filesystem.FS)) {
 	t.Helper()
-	t.Run("fat", func(t *testing.T) {
-		h := fsfuzz.GetFAT()
-		defer h.Release()
-		fn(t, h.FS())
-	})
-	t.Run("lfs", func(t *testing.T) {
-		h := fsfuzz.GetLittle()
-		defer h.Release()
-		fn(t, h.FS())
+	for _, backend := range []struct {
+		name string
+		get  func() *fsfuzz.Harness
+	}{
+		{"fat32", fsfuzz.GetFAT32},
+		{"exfat", fsfuzz.GetExFAT},
+		{"lfs", fsfuzz.GetLittle},
+	} {
+		t.Run(backend.name, func(t *testing.T) {
+			h := backend.get()
+			defer h.Release()
+			fn(t, h.FS())
+		})
+	}
+}
+
+// eachFAT runs fn as a subtest against both FAT variants.
+//
+// Both, because they are only the same driver above the FAT itself: FAT32 chains
+// clusters through a 32-bit table and keeps its root directory in one of those
+// chains, while exFAT has an allocation bitmap and a fixed root. Every bug pinned
+// in this file is in the file layer, above where the two part ways — running both
+// is what establishes that, and it is what would catch a fix that landed in one
+// variant and not the other.
+func eachFAT(t *testing.T, name string, fn func(t *testing.T, fsys *filesystem.FS)) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		for _, variant := range []struct {
+			name string
+			get  func() *fsfuzz.Harness
+		}{
+			{"fat32", fsfuzz.GetFAT32},
+			{"exfat", fsfuzz.GetExFAT},
+		} {
+			t.Run(variant.name, func(t *testing.T) {
+				h := variant.get()
+				defer h.Release()
+				fn(t, h.FS())
+			})
+		}
 	})
 }
 
@@ -85,10 +116,7 @@ func TestDivergenceReadIgnoresAccessMode(t *testing.T) {
 		return viaRead, viaReadAt, readErr, readAtErr
 	}
 
-	t.Run("fat refuses, which is correct", func(t *testing.T) {
-		h := fsfuzz.GetFAT()
-		defer h.Release()
-		fsys := h.FS()
+	eachFAT(t, "fat refuses, which is correct", func(t *testing.T, fsys *filesystem.FS) {
 		_, _, readErr, readAtErr := read(t, fsys)
 		if readErr == nil {
 			t.Error("Read through an O_WRONLY handle succeeded")
@@ -185,20 +213,16 @@ func TestDivergenceSeekBoundedBySize(t *testing.T) {
 		return off
 	}
 
-	t.Run("fat grows a writable file, which is the bug", func(t *testing.T) {
-		h := fsfuzz.GetFAT()
-		defer h.Release()
-		if got := sizeAfterWritableSeek(t, h.FS()); got != seekTo {
+	eachFAT(t, "fat grows a writable file, which is the bug", func(t *testing.T, fsys *filesystem.FS) {
+		if got := sizeAfterWritableSeek(t, fsys); got != seekTo {
 			t.Fatalf("FAT no longer grows a file on a seek past EOF: size %d, want %d. "+
 				"If the fix was intentional, delete this test and clear "+
 				"fsfuzz.Caps.SeekBoundedBySize.", got, seekTo)
 		}
 	})
 
-	t.Run("fat clips a read-only seek, which is the bug", func(t *testing.T) {
-		h := fsfuzz.GetFAT()
-		defer h.Release()
-		if got := offsetAfterReadOnlySeek(t, h.FS()); got != int64(len(initial)) {
+	eachFAT(t, "fat clips a read-only seek, which is the bug", func(t *testing.T, fsys *filesystem.FS) {
+		if got := offsetAfterReadOnlySeek(t, fsys); got != int64(len(initial)) {
 			t.Fatalf("FAT no longer clips a read-only seek past EOF: offset %d, want %d "+
 				"(the clipped size). If the fix was intentional, delete this test and "+
 				"clear fsfuzz.Caps.SeekBoundedBySize.", got, len(initial))
@@ -257,10 +281,8 @@ func TestDivergenceHolesAreGarbage(t *testing.T) {
 		return buf[0]
 	}
 
-	t.Run("fat hands back the media, which is the bug", func(t *testing.T) {
-		h := fsfuzz.GetFAT()
-		defer h.Release()
-		if got := holeByte(t, h.FS()); got == 0x00 {
+	eachFAT(t, "fat hands back the media, which is the bug", func(t *testing.T, fsys *filesystem.FS) {
+		if got := holeByte(t, fsys); got == 0x00 {
 			t.Fatalf("FAT now zero-fills a hole. The bug is fixed: delete this test "+
 				"and clear fsfuzz.Caps.HolesAreGarbage so the fuzzer starts enforcing "+
 				"the zero-fill. (got %#02x)", got)
@@ -273,6 +295,91 @@ func TestDivergenceHolesAreGarbage(t *testing.T) {
 		if got := holeByte(t, h.FS()); got != 0x00 {
 			t.Errorf("littlefs read %#02x out of a hole, want 0x00: a hole must not "+
 				"expose the contents of the device", got)
+		}
+	})
+}
+
+// TestDivergenceAppendMovesReadOffset pins the FAT bug behind
+// [fsfuzz.Caps.AppendPerWrite], which the fuzzer found on a five-operation
+// program nobody would have thought to write:
+//
+//	open "/a" O_WRONLY|O_CREATE|O_APPEND; write 45; close
+//	open "/a" O_RDONLY|O_APPEND;          read  48   <- FAT says EOF
+//
+// POSIX is explicit that O_APPEND governs writes: "the file offset shall be set
+// to the end of the file prior to each write". It says nothing about reads, and
+// an O_APPEND handle starts at offset zero like any other. littlefs, which has a
+// native append, does exactly that.
+//
+// FAT has no native append this package can use — fat.ModeOpenAppend implies
+// create, which O_APPEND must not — so (*FATFS).OpenFile emulates one by seeking
+// to the end at open. That seek moves the read offset too, so a file opened for
+// reading with O_APPEND is positioned at its own end and reads EOF forever. The
+// caller is handed an empty file that is not empty.
+func TestDivergenceAppendMovesReadOffset(t *testing.T) {
+	const contents = "the file you will not be shown"
+
+	// firstRead writes a file, reopens it O_RDONLY|O_APPEND, and reads. POSIX says
+	// this returns the contents.
+	firstRead := func(t *testing.T, fsys *filesystem.FS) (string, error) {
+		t.Helper()
+		f, err := fsys.OpenFile("/a", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o666)
+		if err != nil {
+			t.Fatal("create:", err)
+		}
+		if _, err = f.WriteString(contents); err != nil {
+			t.Fatal("write:", err)
+		}
+		if err = f.Close(); err != nil {
+			t.Fatal("close:", err)
+		}
+
+		f, err = fsys.OpenFile("/a", os.O_RDONLY|os.O_APPEND, 0o666)
+		if err != nil {
+			t.Fatal("reopen:", err)
+		}
+		defer f.Close()
+		buf := make([]byte, len(contents))
+		n, err := f.Read(buf)
+		return string(buf[:n]), err
+	}
+
+	// os.File is the reference, so ask it rather than assert from memory.
+	t.Run("os returns the contents, which is the standard", func(t *testing.T) {
+		path := t.TempDir() + "/a"
+		if err := os.WriteFile(path, []byte(contents), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.OpenFile(path, os.O_RDONLY|os.O_APPEND, 0o666)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		buf := make([]byte, len(contents))
+		n, err := f.Read(buf)
+		if err != nil || string(buf[:n]) != contents {
+			t.Fatalf("os.File read %q, %v through an O_RDONLY|O_APPEND handle; want the "+
+				"contents. If this fails, the premise of this whole test is wrong.",
+				buf[:n], err)
+		}
+	})
+
+	eachFAT(t, "fat reads EOF, which is the bug", func(t *testing.T, fsys *filesystem.FS) {
+		got, err := firstRead(t, fsys)
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("FAT no longer positions an O_APPEND handle at EOF for reading: read "+
+				"%q, %v. The bug is fixed: drop the open-time seek from the model in "+
+				"fsfuzz.model.wantOpen and delete this test.", got, err)
+		}
+	})
+
+	t.Run("littlefs returns the contents, which is correct", func(t *testing.T) {
+		h := fsfuzz.GetLittle()
+		defer h.Release()
+		got, err := firstRead(t, h.FS())
+		if err != nil || got != contents {
+			t.Errorf("littlefs read %q, %v through an O_RDONLY|O_APPEND handle, want the "+
+				"contents: O_APPEND must not move the read offset", got, err)
 		}
 	})
 }
@@ -346,10 +453,7 @@ func TestDivergenceTruncateMovesOffset(t *testing.T) {
 		return off
 	}
 
-	t.Run("fat moves the offset, which is the bug", func(t *testing.T) {
-		h := fsfuzz.GetFAT()
-		defer h.Release()
-		fsys := h.FS()
+	eachFAT(t, "fat moves the offset, which is the bug", func(t *testing.T, fsys *filesystem.FS) {
 		if got := offsetAfterTruncate(t, fsys); got != truncTo {
 			t.Fatalf("FAT no longer clamps the offset on truncate: offset %d, want %d. "+
 				"If the fix was intentional, delete this test and clear "+

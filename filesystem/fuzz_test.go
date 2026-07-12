@@ -10,18 +10,25 @@ import (
 	"github.com/soypat/tinyboot/filesystem/fsfuzz"
 )
 
-// The fuzz targets. There are two because go test -fuzz runs one target at a
-// time and testing.F has no subtests, so a backend cannot be a subtest the way
-// it is everywhere else in this package. They share an encoding, which means a
-// corpus file found by one is a valid input to the other: copying a find from
-// testdata/fuzz/FuzzLittle into testdata/fuzz/FuzzFAT is a legitimate and
-// productive thing to do.
+// The fuzz targets. There is one per backend because go test -fuzz runs one
+// target at a time and testing.F has no subtests, so a backend cannot be a
+// subtest the way it is everywhere else in this package. They share an encoding,
+// which means a corpus file found by one is a valid input to every other:
+// copying a find from testdata/fuzz/FuzzLittle into testdata/fuzz/FuzzFAT32 is a
+// legitimate and productive thing to do.
 //
-// Neither target calls rand. Neither one may ever call rand. See the fsfuzz
-// package documentation for what that buys and what breaking it would cost.
+// No target calls rand. No target may ever call rand. See the fsfuzz package
+// documentation for what that buys and what breaking it would cost.
 
-func FuzzFAT(f *testing.F) {
-	fuzzBackend(f, fsfuzz.GetFAT)
+// FuzzFAT32 is the one to run if you are only going to run one. FAT32 is what an
+// SD card, a USB stick and a boot partition are formatted as, so it is the code
+// that will actually be executed in the field.
+func FuzzFAT32(f *testing.F) {
+	fuzzBackend(f, fsfuzz.GetFAT32)
+}
+
+func FuzzExFAT(f *testing.F) {
+	fuzzBackend(f, fsfuzz.GetExFAT)
 }
 
 func FuzzLittle(f *testing.F) {
@@ -218,7 +225,8 @@ type backendHarness struct {
 
 func eachBackendHarness() []backendHarness {
 	return []backendHarness{
-		{"fat", fsfuzz.GetFAT},
+		{"fat32", fsfuzz.GetFAT32},
+		{"exfat", fsfuzz.GetExFAT},
 		{"lfs", fsfuzz.GetLittle},
 	}
 }

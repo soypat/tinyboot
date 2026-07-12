@@ -24,20 +24,40 @@ import (
 // a free list that is capped rather than garbage collected, and an iteration
 // resets what it borrowed instead of building a new one.
 //
-// The resulting ceiling is the only number that matters, and it is small:
+// The devices are as small as each format allows:
 //
-//	FAT      2 MiB device x (GOMAXPROCS+2) harnesses
-//	littlefs 256 KiB device x (GOMAXPROCS+2) harnesses
+//	littlefs 256 KiB
+//	exFAT    2 MiB    (the fat formatter rejects anything smaller)
+//	FAT32    32.5 MiB (the format itself does not permit smaller)
 //
-// On a 16-core machine that is at most 36 MiB of FAT and 4.5 MiB of littlefs,
-// held flat for the life of the run. Everything else — the model, the buffers,
-// the decoded program — is kilobytes.
+// FAT32 is the outlier and cannot be shrunk. The variant is *defined* by having
+// more than 65525 clusters, so the smallest volume a driver will mount as FAT32
+// rather than silently as FAT16 is over 32 MiB — see [FormatFAT32]. What makes it
+// affordable anyway is that a fuzz program touches almost none of it and [RAM] is
+// sparse: a block nobody wrote is not stored at all. A formatted FAT32 device
+// costs 859 KiB, and a worker running programs against it holds ~11 MiB, flat,
+// measured over 300k iterations.
+//
+// A word on what that does and does not buy. Under `go test -fuzz` the memory is
+// dominated by Go's own fuzzing machinery — a target whose body is empty still
+// costs about 90 MiB per worker process — and by the heap the collector sizes to
+// absorb 175k iterations a second of churn. Bound it with GOMEMLIMIT, which
+// works: at GOMEMLIMIT=128MiB a four-worker FuzzFAT32 run peaks around 500 MiB,
+// against 454 MiB for a target that does nothing at all. What this package is
+// responsible for is that the per-iteration cost is bounded and small (2.6 KiB
+// and 14 allocations, guarded by BenchmarkFuzzIteration) and that nothing grows
+// without limit — which is the property whose absence takes a machine down.
 const (
 	// fatSectors is 4096 because exFAT will not format anything smaller: the fat
 	// formatter rejects 2048 sectors and below with FR_MKFS_ABORTED. It is a
 	// floor, not a preference.
 	fatSectorSize = 512
 	fatSectors    = 4096 // 2 MiB, the smallest exFAT that formats.
+
+	// One sector per cluster, which is the smallest cluster FAT32 allows and
+	// therefore the smallest FAT32 there is. 65526 clusters plus two FATs to
+	// describe them.
+	fat32SectorSize = 512
 
 	// littlefs formats down to 64 KiB, but a device that small fills up in a few
 	// operations, and every operation after the device fills is discarded by the
@@ -48,30 +68,41 @@ const (
 	lfsBlocks    = 64 // 256 KiB.
 )
 
+// fat32Sectors is 66,662 sectors: 32.6 MiB. See [MinFAT32Sectors].
+var fat32Sectors = MinFAT32Sectors(fat32SectorSize)
+
 // Formatting costs far more than everything an iteration does with the result,
 // so it happens once per process and every harness starts from a copy of the
-// image. Both are pure functions of nothing, so memoizing them keeps the fuzz
+// image. These are pure functions of nothing, so memoizing them keeps the fuzz
 // target deterministic.
 var (
-	pristineFAT = sync.OnceValue(func() []byte {
+	pristineExFAT = sync.OnceValue(func() *RAM {
 		bd := NewRAM(fatSectorSize, fatSectors)
 		var fmtr fat.Formatter
-		// exFAT because fat's FAT12/16/32 mkfs is not implemented (fat/format.go
-		// formatFAT). The flag conversion under test is shared by every variant.
 		err := fmtr.Format(bd, fatSectorSize, fatSectors, fat.FormatConfig{Format: fat.FormatExFAT})
 		if err != nil {
-			panic("fsfuzz: format fat: " + err.Error())
+			panic("fsfuzz: format exfat: " + err.Error())
 		}
-		return bd.mem
+		return bd
 	})
-	pristineLFS = sync.OnceValue(func() []byte {
+	pristineFAT32 = sync.OnceValue(func() *RAM {
+		bd := NewRAM(fat32SectorSize, fat32Sectors)
+		// Not fat.Formatter: its FAT12/16/32 mkfs is a stub that returns
+		// frUnsupported (fat/format.go formatFAT). Its FAT32 mount and file code is
+		// complete, which is the part being fuzzed.
+		if err := FormatFAT32(bd, fat32SectorSize, fat32Sectors); err != nil {
+			panic("fsfuzz: format fat32: " + err.Error())
+		}
+		return bd
+	})
+	pristineLFS = sync.OnceValue(func() *RAM {
 		bd := NewRAM(lfsPageSize, lfsBlockSize/lfsPageSize*lfsBlocks)
 		var fmtr lfs.Formatter
 		err := fmtr.Format(bd, lfsPageSize, lfsBlockSize, lfsBlocks, lfs.FormatConfig{})
 		if err != nil {
 			panic("fsfuzz: format lfs: " + err.Error())
 		}
-		return bd.mem
+		return bd
 	})
 )
 
@@ -128,9 +159,18 @@ func (h *Harness) prepare() error {
 // churn the free list exists to prevent, so always defer it.
 func (h *Harness) Release() { h.pool.put(h) }
 
-// GetFAT returns a harness with a freshly formatted exFAT filesystem mounted.
+// GetFAT32 returns a harness with a freshly formatted FAT32 filesystem mounted.
 // Release it when done.
-func GetFAT() *Harness { return fatPool.get() }
+//
+// FAT32 is the FAT variant worth caring about — SD cards, USB sticks and boot
+// partitions are FAT32 — and it is a genuinely different driver path from exFAT:
+// a 32-bit FAT and a cluster-chained root directory, rather than exFAT's
+// allocation bitmap. Fuzz both.
+func GetFAT32() *Harness { return fat32Pool.get() }
+
+// GetExFAT returns a harness with a freshly formatted exFAT filesystem mounted.
+// Release it when done.
+func GetExFAT() *Harness { return exfatPool.get() }
 
 // GetLittle returns a harness with a freshly formatted littlefs mounted. Release
 // it when done.
@@ -186,30 +226,35 @@ func (p *harnessPool) put(h *Harness) {
 }
 
 var (
-	fatPool = newHarnessPool(func() *Harness {
-		bd := newRAMFrom(fatSectorSize, pristineFAT())
-		fsys := new(filesystem.FATFS)
-		h := &Harness{
-			Caps: CapsFAT,
-			bd:   bd,
-			fs:   filesystem.NewFAT(fsys),
-			// Remounting the same FATFS in place is what lets the *filesystem.FS
-			// wrapper — and the handle pools inside it — outlive the reset. The
-			// wrapper holds this exact pointer, so it keeps working.
-			mount: func() error { return fsys.Mount(bd, fatSectorSize, fat.ModeRW) },
-		}
-		return h
-	})
+	exfatPool = newHarnessPool(func() *Harness { return newFATHarness(pristineExFAT(), fatSectorSize) })
+	fat32Pool = newHarnessPool(func() *Harness { return newFATHarness(pristineFAT32(), fat32SectorSize) })
 
 	lfsPool = newHarnessPool(func() *Harness {
-		bd := newRAMFrom(lfsPageSize, pristineLFS())
+		bd := newRAMFrom(pristineLFS())
 		fsys := new(filesystem.LittleFS)
-		h := &Harness{
+		return &Harness{
 			Caps:  CapsLittle,
 			bd:    bd,
 			fs:    filesystem.NewLittle(fsys),
 			mount: func() error { return fsys.Mount(bd, lfsPageSize, lfsBlockSize, lfs.ModeRW) },
 		}
-		return h
 	})
 )
+
+// newFATHarness builds a harness around either FAT variant. They share a driver
+// and so share their [Caps]: every divergence quarantined below lives in the file
+// layer, above the point where FAT32 and exFAT part ways, and the fuzzer confirms
+// both variants exhibit all of them.
+func newFATHarness(pristine *RAM, sectorSize int) *Harness {
+	bd := newRAMFrom(pristine)
+	fsys := new(filesystem.FATFS)
+	return &Harness{
+		Caps: CapsFAT,
+		bd:   bd,
+		fs:   filesystem.NewFAT(fsys),
+		// Remounting the same FATFS in place is what lets the *filesystem.FS
+		// wrapper — and the handle pools inside it — outlive the reset. The wrapper
+		// holds this exact pointer, so it keeps working.
+		mount: func() error { return fsys.Mount(bd, sectorSize, fat.ModeRW) },
+	}
+}
