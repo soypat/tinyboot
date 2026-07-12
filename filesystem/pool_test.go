@@ -9,6 +9,7 @@ import (
 	"github.com/soypat/fat"
 	"github.com/soypat/lfs"
 	"github.com/soypat/tinyboot/filesystem"
+	"github.com/soypat/tinyboot/filesystem/fsfuzz"
 )
 
 // TestPoolRecyclesHandles checks the core claim of FS: a File closed and then
@@ -177,7 +178,7 @@ func testSteadyStateAllocs(t *testing.T, cycle func()) {
 func newFATFS(t testing.TB) *filesystem.FATFS {
 	t.Helper()
 	const sectorSize, sectors = 512, 32000
-	bd := newRamBD(sectorSize, sectors)
+	bd := fsfuzz.NewRAM(sectorSize, sectors)
 	var fmtr fat.Formatter
 	if err := fmtr.Format(bd, sectorSize, sectors, fat.FormatConfig{Format: fat.FormatExFAT}); err != nil {
 		t.Fatal("format fat:", err)
@@ -192,7 +193,7 @@ func newFATFS(t testing.TB) *filesystem.FATFS {
 func newLittleFS(t testing.TB) *filesystem.LittleFS {
 	t.Helper()
 	const pageSize, blockSize, blocks = 256, 4096, 64
-	bd := newRamBD(pageSize, blockSize/pageSize*blocks)
+	bd := fsfuzz.NewRAM(pageSize, blockSize/pageSize*blocks)
 	var fmtr lfs.Formatter
 	if err := fmtr.Format(bd, pageSize, blockSize, blocks, lfs.FormatConfig{}); err != nil {
 		t.Fatal("format lfs:", err)

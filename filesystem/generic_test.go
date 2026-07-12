@@ -10,50 +10,8 @@ import (
 	"github.com/soypat/fat"
 	"github.com/soypat/lfs"
 	"github.com/soypat/tinyboot/filesystem"
+	"github.com/soypat/tinyboot/filesystem/fsfuzz"
 )
-
-// ramBD is an in-memory BlockDevice. Both fat.BlockDevice and lfs.BlockDevice
-// declare the same three methods, so one device serves both backends. Blocks are
-// addressed in units of unit bytes: a sector for FAT, a page for littlefs.
-type ramBD struct {
-	unit int
-	mem  []byte
-}
-
-func newRamBD(unit, units int) *ramBD {
-	bd := &ramBD{unit: unit, mem: make([]byte, unit*units)}
-	for i := range bd.mem {
-		bd.mem[i] = 0xff
-	}
-	return bd
-}
-
-func (bd *ramBD) ReadBlocks(dst []byte, startBlock int64) (int, error) {
-	off := int(startBlock) * bd.unit
-	if off < 0 || off+len(dst) > len(bd.mem) {
-		return 0, errors.New("ramBD: read out of range")
-	}
-	return copy(dst, bd.mem[off:]), nil
-}
-
-func (bd *ramBD) WriteBlocks(data []byte, startBlock int64) (int, error) {
-	off := int(startBlock) * bd.unit
-	if off < 0 || off+len(data) > len(bd.mem) {
-		return 0, errors.New("ramBD: write out of range")
-	}
-	return copy(bd.mem[off:], data), nil
-}
-
-func (bd *ramBD) EraseBlocks(startBlock, numBlocks int64) error {
-	off, n := int(startBlock)*bd.unit, int(numBlocks)*bd.unit
-	if off < 0 || off+n > len(bd.mem) {
-		return errors.New("ramBD: erase out of range")
-	}
-	for i := off; i < off+n; i++ {
-		bd.mem[i] = 0xff
-	}
-	return nil
-}
 
 // backend is the portable surface the cross-backend tests exercise. It exists so
 // a single table of cases runs identically against FAT and littlefs; the two
@@ -111,7 +69,7 @@ func (b lfsBackend) mkdir(path string) error { return b.fsys.Mkdir(path) }
 func newFATBackend(t *testing.T) backend {
 	t.Helper()
 	const sectorSize, sectors = 512, 32000
-	bd := newRamBD(sectorSize, sectors)
+	bd := fsfuzz.NewRAM(sectorSize, sectors)
 	var fmtr fat.Formatter
 	// exFAT, because fat's FAT12/16/32 mkfs is not implemented yet
 	// (fat/format.go formatFAT). The flag conversion under test is shared by
@@ -129,7 +87,7 @@ func newFATBackend(t *testing.T) backend {
 func newLFSBackend(t *testing.T) backend {
 	t.Helper()
 	const pageSize, blockSize, blocks = 256, 4096, 64
-	bd := newRamBD(pageSize, blockSize/pageSize*blocks)
+	bd := fsfuzz.NewRAM(pageSize, blockSize/pageSize*blocks)
 	var fmtr lfs.Formatter
 	if err := fmtr.Format(bd, pageSize, blockSize, blocks, lfs.FormatConfig{}); err != nil {
 		t.Fatal("format lfs:", err)
