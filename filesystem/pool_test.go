@@ -180,7 +180,7 @@ func newFATFS(t testing.TB) *filesystem.FATFS {
 	const sectorSize, sectors = 512, 32000
 	bd := fsfuzz.NewRAM(sectorSize, sectors)
 	var fmtr fat.Formatter
-	if err := fmtr.Format(bd, sectorSize, sectors, fat.FormatConfig{Format: fat.FormatExFAT}); err != nil {
+	if err := fmtr.Format(bd, sectorSize, sectors, fat.FormatParams{Format: fat.FormatExFAT}); err != nil {
 		t.Fatal("format fat:", err)
 	}
 	fsys := new(filesystem.FATFS)
@@ -195,7 +195,7 @@ func newLittleFS(t testing.TB) *filesystem.LittleFS {
 	const pageSize, blockSize, blocks = 256, 4096, 64
 	bd := fsfuzz.NewRAM(pageSize, blockSize/pageSize*blocks)
 	var fmtr lfs.Formatter
-	if err := fmtr.Format(bd, pageSize, blockSize, blocks, lfs.FormatConfig{}); err != nil {
+	if err := fmtr.Format(bd, pageSize, blockSize, blocks, lfs.FormatParams{}); err != nil {
 		t.Fatal("format lfs:", err)
 	}
 	fsys := new(filesystem.LittleFS)

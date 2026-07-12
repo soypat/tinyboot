@@ -48,7 +48,7 @@ Corpus stability is a hard contract, enforced by a golden test:
 
 Memory is bounded on purpose, because a fuzzer that allocates per iteration will kill the machine it runs on long before it finds a bug. Devices and mounted filesystems come from a capped free list (not `sync.Pool`, which the GC drains and so reintroduces the exact churn under a fuzzer); a device resets by restoring only the blocks the program dirtied; and every handle is closed and the count asserted, since a handle that escapes its pool is a handle the pool has lost forever. An iteration costs ~2.6 KiB and 14 allocations, guarded by `BenchmarkFuzzIteration`.
 
-The block device is also **sparse**, which is what makes FAT32 testable at all. FAT32 is *defined* as having more than 65525 clusters, so the smallest volume a driver will mount as FAT32 — rather than silently as FAT16 — is over 32 MiB. Storing only the blocks something has actually written brings a formatted 32.5 MiB volume down to 859 KiB.
+The block device is also **sparse**, which is what makes FAT32 testable at all. FAT32 is *defined* as having more than 65525 clusters, so the smallest volume a driver will mount as FAT32 — rather than silently as FAT16 — is 32.5 MiB. Storing only the blocks something has actually written brings a formatted one down to 869 KiB.
 
 ```sh
 go test ./filesystem/...                                          # deterministic: seeded programs + corpus-stability golden

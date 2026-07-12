@@ -74,7 +74,7 @@ func newFATBackend(t *testing.T) backend {
 	// exFAT, because fat's FAT12/16/32 mkfs is not implemented yet
 	// (fat/format.go formatFAT). The flag conversion under test is shared by
 	// every FAT variant, so this exercises the same code path.
-	if err := fmtr.Format(bd, sectorSize, sectors, fat.FormatConfig{Format: fat.FormatExFAT}); err != nil {
+	if err := fmtr.Format(bd, sectorSize, sectors, fat.FormatParams{Format: fat.FormatExFAT}); err != nil {
 		t.Fatal("format fat:", err)
 	}
 	var fsys filesystem.FATFS
@@ -89,7 +89,7 @@ func newLFSBackend(t *testing.T) backend {
 	const pageSize, blockSize, blocks = 256, 4096, 64
 	bd := fsfuzz.NewRAM(pageSize, blockSize/pageSize*blocks)
 	var fmtr lfs.Formatter
-	if err := fmtr.Format(bd, pageSize, blockSize, blocks, lfs.FormatConfig{}); err != nil {
+	if err := fmtr.Format(bd, pageSize, blockSize, blocks, lfs.FormatParams{}); err != nil {
 		t.Fatal("format lfs:", err)
 	}
 	var fsys filesystem.LittleFS

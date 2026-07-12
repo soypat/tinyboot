@@ -6,17 +6,19 @@ import (
 	"testing"
 )
 
-// TestFAT32ImageIsFAT32 is the test this formatter exists to pass.
+// TestFAT32ImageIsFAT32 guards the geometry the FAT32 harness is built on.
 //
 // Nothing in a boot sector says "this is FAT32". The driver counts the clusters
 // and decides: more than 65525 and it is FAT32, fewer and it is FAT16, and it
-// mounts either one without complaint. So an image that is one cluster short
-// gets silently mounted as FAT16, the FAT32 code paths never execute, and every
-// test in the package passes anyway while fuzzing the wrong filesystem.
+// mounts either one without complaint. So a volume a few sectors short is
+// silently mounted as FAT16, the FAT32 code paths never execute, and every test
+// here passes anyway while fuzzing a filesystem nobody asked for.
 //
-// This recomputes fat's own classification (init_fat) from the bytes the
-// formatter actually wrote, so a geometry mistake is a failure here rather than
-// a silent hole in the coverage.
+// fat.Formatter refuses to build such a volume, so this is belt and braces — but
+// the belt is what fails if fat32Sectors is ever "tidied" down to a rounder
+// number. It recomputes fat's own classification (init_fat) from the bytes of the
+// formatted image, so a geometry mistake is a loud failure rather than a silent
+// hole in the coverage.
 func TestFAT32ImageIsFAT32(t *testing.T) {
 	// fat's clustMaxFAT16: a volume with more clusters than this is FAT32. It is
 	// 0xFFF5 rather than 0xFFF6 for the reasons FatFs and Microsoft give, which

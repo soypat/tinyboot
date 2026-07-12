@@ -32,7 +32,7 @@ import (
 //
 // FAT32 is the outlier and cannot be shrunk. The variant is *defined* by having
 // more than 65525 clusters, so the smallest volume a driver will mount as FAT32
-// rather than silently as FAT16 is over 32 MiB — see [FormatFAT32]. What makes it
+// rather than silently as FAT16 is over 32 MiB — see fat.Formatter. What makes it
 // affordable anyway is that a fuzz program touches almost none of it and [RAM] is
 // sparse: a block nobody wrote is not stored at all. A formatted FAT32 device
 // costs 859 KiB, and a worker running programs against it holds ~11 MiB, flat,
@@ -54,10 +54,14 @@ const (
 	fatSectorSize = 512
 	fatSectors    = 4096 // 2 MiB, the smallest exFAT that formats.
 
-	// One sector per cluster, which is the smallest cluster FAT32 allows and
-	// therefore the smallest FAT32 there is. 65526 clusters plus two FATs to
-	// describe them.
+	// One sector per cluster, which is the smallest cluster FAT32 allows, and
+	// 66600 sectors, which is the smallest volume that has more than 65525 of them
+	// and is therefore the smallest thing a driver will mount as FAT32 rather than
+	// as FAT16. A sector less and fat.Formatter refuses, rather than handing back a
+	// FAT16 wearing a FAT32 boot record.
 	fat32SectorSize = 512
+	fat32Sectors    = 66600 // 32.5 MiB.
+	fat32Cluster    = 1
 
 	// littlefs formats down to 64 KiB, but a device that small fills up in a few
 	// operations, and every operation after the device fills is discarded by the
@@ -68,9 +72,6 @@ const (
 	lfsBlocks    = 64 // 256 KiB.
 )
 
-// fat32Sectors is 66,662 sectors: 32.6 MiB. See [MinFAT32Sectors].
-var fat32Sectors = MinFAT32Sectors(fat32SectorSize)
-
 // Formatting costs far more than everything an iteration does with the result,
 // so it happens once per process and every harness starts from a copy of the
 // image. These are pure functions of nothing, so memoizing them keeps the fuzz
@@ -79,7 +80,7 @@ var (
 	pristineExFAT = sync.OnceValue(func() *RAM {
 		bd := NewRAM(fatSectorSize, fatSectors)
 		var fmtr fat.Formatter
-		err := fmtr.Format(bd, fatSectorSize, fatSectors, fat.FormatConfig{Format: fat.FormatExFAT})
+		err := fmtr.Format(bd, fatSectorSize, fatSectors, fat.FormatParams{Format: fat.FormatExFAT})
 		if err != nil {
 			panic("fsfuzz: format exfat: " + err.Error())
 		}
@@ -87,10 +88,12 @@ var (
 	})
 	pristineFAT32 = sync.OnceValue(func() *RAM {
 		bd := NewRAM(fat32SectorSize, fat32Sectors)
-		// Not fat.Formatter: its FAT12/16/32 mkfs is a stub that returns
-		// frUnsupported (fat/format.go formatFAT). Its FAT32 mount and file code is
-		// complete, which is the part being fuzzed.
-		if err := FormatFAT32(bd, fat32SectorSize, fat32Sectors); err != nil {
+		var fmtr fat.Formatter
+		err := fmtr.Format(bd, fat32SectorSize, fat32Sectors, fat.FormatParams{
+			Format:      fat.FormatFAT32,
+			ClusterSize: fat32Cluster,
+		})
+		if err != nil {
 			panic("fsfuzz: format fat32: " + err.Error())
 		}
 		return bd
@@ -98,7 +101,7 @@ var (
 	pristineLFS = sync.OnceValue(func() *RAM {
 		bd := NewRAM(lfsPageSize, lfsBlockSize/lfsPageSize*lfsBlocks)
 		var fmtr lfs.Formatter
-		err := fmtr.Format(bd, lfsPageSize, lfsBlockSize, lfsBlocks, lfs.FormatConfig{})
+		err := fmtr.Format(bd, lfsPageSize, lfsBlockSize, lfsBlocks, lfs.FormatParams{})
 		if err != nil {
 			panic("fsfuzz: format lfs: " + err.Error())
 		}
