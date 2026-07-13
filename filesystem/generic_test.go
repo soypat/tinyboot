@@ -68,13 +68,12 @@ func (b lfsBackend) mkdir(path string) error { return b.fsys.Mkdir(path) }
 
 func newFATBackend(t *testing.T) backend {
 	t.Helper()
-	const sectorSize, sectors = 512, 32000
+	// 66600 sectors is the smallest volume that formats as FAT32 rather than
+	// silently becoming FAT16. The RAM device is sparse, so the size is cheap.
+	const sectorSize, sectors = 512, 66600
 	bd := fsfuzz.NewRAM(sectorSize, sectors)
 	var fmtr fat.Formatter
-	// exFAT, because fat's FAT12/16/32 mkfs is not implemented yet
-	// (fat/format.go formatFAT). The flag conversion under test is shared by
-	// every FAT variant, so this exercises the same code path.
-	if err := fmtr.Format(bd, sectorSize, sectors, fat.FormatParams{Format: fat.FormatExFAT}); err != nil {
+	if err := fmtr.Format(bd, sectorSize, sectors, fat.FormatParams{Format: fat.FormatFAT32}); err != nil {
 		t.Fatal("format fat:", err)
 	}
 	var fsys filesystem.FATFS
