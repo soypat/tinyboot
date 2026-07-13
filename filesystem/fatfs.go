@@ -7,7 +7,7 @@ import (
 	"github.com/soypat/fat"
 )
 
-// FATFS adapts a mounted [fat.FS] to [FSNoAlloc].
+// FATFS adapts a mounted [fat.FS] to [FSRaw].
 type FATFS struct {
 	fs fat.FS
 }
@@ -85,8 +85,7 @@ func (*FATFS) mode(flag int, perm fs.FileMode) (m fat.Mode, postTrunc bool, err 
 	return m, postTrunc, nil
 }
 
-
-// OpenFile implements [FSNoAlloc], mirroring [os.OpenFile]. See (*FATFS).mode for how
+// OpenFile implements [FSRaw], mirroring [os.OpenFile]. See (*FATFS).mode for how
 // flag is translated and why perm is ignored.
 func (fsys *FATFS) OpenFile(f *fat.File, path string, flag int, perm fs.FileMode) error {
 	mode, postTrunc, err := fsys.mode(flag, perm)

@@ -12,7 +12,7 @@ import (
 )
 
 // benchFS is one mounted backend presented two ways: through the pooled
-// [filesystem.FS], and through [filesystem.FSNoAlloc] with a caller-owned handle.
+// [filesystem.FS], and through [filesystem.FSRaw] with a caller-owned handle.
 // Both talk to the same mount, so a benchmark that runs the same operation down
 // each path measures exactly what the pooled wrapper costs over the hand-managed
 // handle it exists to replace — that difference is the point of the whole design,

@@ -7,7 +7,7 @@ import (
 	"github.com/soypat/lfs"
 )
 
-// LittleFS adapts a mounted [lfs.FS] to [FSNoAlloc].
+// LittleFS adapts a mounted [lfs.FS] to [FSRaw].
 type LittleFS struct {
 	fs lfs.FS
 }
@@ -72,7 +72,7 @@ func (*LittleFS) openFlags(flag int, perm fs.FileMode) (of lfs.OpenFlags, err er
 	return of, nil
 }
 
-// OpenFile implements [FSNoAlloc], mirroring [os.OpenFile]. See (*LittleFS).openFlags
+// OpenFile implements [FSRaw], mirroring [os.OpenFile]. See (*LittleFS).openFlags
 // for how flag is translated and why perm is ignored.
 func (fsys *LittleFS) OpenFile(f *lfs.File, path string, flag int, perm fs.FileMode) error {
 	of, err := fsys.openFlags(flag, perm)

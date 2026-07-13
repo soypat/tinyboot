@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	_ FSNoAlloc[*fat.File, *fat.Dir, *fat.FileInfo] = (*FATFS)(nil)
-	_ FSNoAlloc[*lfs.File, *lfs.Dir, *lfs.FileInfo] = (*LittleFS)(nil)
+	_ FSRaw[*fat.File, *fat.Dir, *fat.FileInfo] = (*FATFS)(nil)
+	_ FSRaw[*lfs.File, *lfs.Dir, *lfs.FileInfo] = (*LittleFS)(nil)
 )
 
 var (
@@ -61,15 +61,15 @@ type DirHandle[I FileInfo] interface {
 	ForEachFile(cb func(I) error) error
 }
 
-// FSNoAlloc is a mounted filesystem. The directory handle type D is a separate type
+// FSRaw is a mounted filesystem. The directory handle type D is a separate type
 // parameter from the info type I so that OpenDir receives the backend's concrete
 // directory type; taking a DirHandle[I] interface here would force every
 // implementation into a type assertion to recover it.
 //
 // Mounting is not part of this interface: fat and lfs take different geometry
 // (fat needs a sector size, lfs needs a page size and an erase block size), and
-// no useful abstraction spans the two. Mount the native FSNoAlloc, then wrap it.
-type FSNoAlloc[F FileHandle, D DirHandle[I], I FileInfo] interface {
+// no useful abstraction spans the two. Mount the native FSRaw, then wrap it.
+type FSRaw[F FileHandle, D DirHandle[I], I FileInfo] interface {
 	// OpenFile mirrors [os.OpenFile]: flag is a bitmask of the os.O_* constants
 	// and perm is ignored (see the package documentation).
 	OpenFile(f F, path string, flag int, perm fs.FileMode) error

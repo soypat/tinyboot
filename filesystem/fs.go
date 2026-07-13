@@ -29,7 +29,7 @@
 //
 // # Which interface to use
 //
-// [FSNoAlloc] is the allocation-free layer: it is generic over the backend's
+// [FSRaw] is the allocation-free layer: it is generic over the backend's
 // handle types and the caller owns every handle. [FS] is the convenient layer
 // built on top of it. FS is deliberately not a generic type — the backend types
 // are erased at construction, inside [NewFS] — so that the types a program
@@ -87,7 +87,7 @@ type FS struct {
 	dirs  sync.Pool // of *Dir, likewise.
 }
 
-// NewFS wraps a mounted [FSNoAlloc] with handle pools, erasing its type
+// NewFS wraps a mounted [FSRaw] with handle pools, erasing its type
 // parameters: the result is a plain *FS. The three constructors say how to
 // allocate a backend handle when a pool is empty; they also let the compiler
 // infer F, D and I, which it cannot do from fsys alone because those parameters
@@ -95,7 +95,7 @@ type FS struct {
 //
 // Prefer [NewFAT] or [NewLittle], which supply them for you.
 func NewFS[F FileHandle, D DirHandle[I], I FileInfo](
-	fsys FSNoAlloc[F, D, I],
+	fsys FSRaw[F, D, I],
 	newFile func() F,
 	newDir func() D,
 	newInfo func() I,
@@ -127,7 +127,7 @@ func NewLittle(fsys *LittleFS) *FS {
 	)
 }
 
-// ifs is [FSNoAlloc] with its type parameters erased: handles cross this
+// ifs is [FSRaw] with its type parameters erased: handles cross this
 // boundary as interfaces. It is what lets [FS] be a non-generic type. Its only
 // implementation is [fsErased], which asserts each handle back to the backend's
 // concrete type. Those assertions cannot fail: every handle FS passes down came
@@ -146,7 +146,7 @@ type ifs interface {
 }
 
 type fsErased[F FileHandle, D DirHandle[I], I FileInfo] struct {
-	fs      FSNoAlloc[F, D, I]
+	fs      FSRaw[F, D, I]
 	newInfo func() I
 }
 
