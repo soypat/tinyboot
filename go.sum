@@ -1,4 +1,4 @@
-github.com/soypat/fat v0.2.0 h1:6p2SqUnc9YDzWrtMkfIZ+8+7olhUso3ageMRQ/1G6+Y=
-github.com/soypat/fat v0.2.0/go.mod h1:6cCZCfoOpl4IbaA4ohTrTYp1ejoUGEoiToDXpXDfAk0=
-github.com/soypat/lfs v0.2.0 h1:tOQG14A9jHSRLeXrXKJ67bHDvna0TkB7anJOir58o4Y=
-github.com/soypat/lfs v0.2.0/go.mod h1:CZ4ZCLXOApQR+Ga3xpgaSmGHZWGIpeUaBGwFzaySfrA=
+github.com/soypat/fat v0.2.1 h1:wYsxsqJBWvTXUvrB8QgcgPFaDnom/2S9XTktc7NQwbc=
+github.com/soypat/fat v0.2.1/go.mod h1:6cCZCfoOpl4IbaA4ohTrTYp1ejoUGEoiToDXpXDfAk0=
+github.com/soypat/lfs v0.2.1 h1:1e/+Q+fqultmBdZ07WcvCN/9Ln7mmENSAAo1UlxrbJw=
+github.com/soypat/lfs v0.2.1/go.mod h1:CZ4ZCLXOApQR+Ga3xpgaSmGHZWGIpeUaBGwFzaySfrA=

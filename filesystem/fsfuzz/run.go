@@ -233,18 +233,6 @@ func (r *runner) step(op Op) error {
 	return nil
 }
 
-// grewOverHole records that a file gained bytes between oldSize and the new end
-// without anything having written them. On a backend that zero-fills, that is
-// unremarkable and the model already has it right. On one where holes read back
-// as whatever was on the media (see Caps.HolesAreGarbage), the model has no idea
-// what those bytes are, so the file's content stops being checkable — see
-// mnode.tainted.
-func (r *runner) grewOverHole(n *mnode, oldSize, newEnd int64) {
-	if r.caps.HolesAreGarbage && newEnd > oldSize {
-		n.tainted = true
-	}
-}
-
 // markDirty records a change to the tree, invalidating every open directory
 // handle. Iterating a directory whose contents changed under it is undefined on
 // both backends, so those handles stop being checkable.
@@ -292,7 +280,7 @@ func (r *runner) openFile(op Op) error {
 	if r.m.files[slot].state == hsOpen {
 		return nil
 	}
-	want, off := r.m.wantOpen(p, flag)
+	want := r.m.wantOpen(p, flag)
 	// A second live handle on one path is undefined on both backends.
 	if want == classOK && !r.caps.AliasedOpen && r.m.openHandles(p) > 0 {
 		return nil
@@ -305,7 +293,7 @@ func (r *runner) openFile(op Op) error {
 		return failure
 	}
 	r.adoptFile(slot, f)
-	r.m.applyOpen(slot, p, flag, off)
+	r.m.applyOpen(slot, p, flag)
 	if created {
 		r.markDirty()
 	}
@@ -375,7 +363,7 @@ func (r *runner) read(op Op) error {
 		// refused to read from. Nothing here is checkable.
 		return nil
 	}
-	if !mf.readable() && !r.caps.ReadIgnoresAccessMode {
+	if !mf.readable() {
 		// Reading a write-only handle must fail, but neither backend maps the
 		// refusal onto a sentinel.
 		_, failure := r.check(classOther, err)
@@ -403,10 +391,13 @@ func (r *runner) read(op Op) error {
 		return r.fail("read %d bytes at offset %d of a %d byte file, want %d",
 			got, mf.off, len(data), want)
 	}
-	if node := r.m.node(mf.path); !node.tainted {
-		if exp := data[mf.off : mf.off+int64(got)]; !bytes.Equal(buf[:got], exp) {
-			return r.fail("read wrong bytes at offset %d: got %x, want %x", mf.off, buf[:got], exp)
-		}
+	// Every byte is checkable, including the ones inside a hole. They were not,
+	// once: FAT grew a file by allocating clusters and never erasing them, so the
+	// contents of a hole were whatever the media last held, and the model had to
+	// give up on a file that had grown over one (mnode.tainted). Both backends
+	// zero-fill now, so the model knows exactly what is in there and says so.
+	if exp := data[mf.off : mf.off+int64(got)]; !bytes.Equal(buf[:got], exp) {
+		return r.fail("read wrong bytes at offset %d: got %x, want %x", mf.off, buf[:got], exp)
 	}
 	mf.off += int64(got)
 	return nil
@@ -424,7 +415,7 @@ func (r *runner) readAt(op Op) error {
 	if handled, failure := r.closedCheck(mf, err); handled {
 		return failure
 	}
-	if (!mf.readable() && !r.caps.ReadIgnoresAccessMode) || off < 0 {
+	if !mf.readable() || off < 0 {
 		_, failure := r.check(classOther, err)
 		return failure
 	}
@@ -448,7 +439,7 @@ func (r *runner) readAt(op Op) error {
 		return r.fail("ReadAt %d bytes at offset %d of a %d byte file, want %d",
 			got, off, len(data), want)
 	}
-	if got > 0 && !r.m.node(mf.path).tainted {
+	if got > 0 {
 		// Only slice once there is something to slice: off may legitimately be
 		// far past the end of the file, where data[off:off] would panic.
 		if exp := data[off : off+int64(got)]; !bytes.Equal(buf[:got], exp) {
@@ -469,19 +460,23 @@ func (r *runner) write(op Op) error {
 	}
 	n := op.Len()
 
-	// Where the write lands. Both backends put an append handle at the end of
-	// the file at open time, but only littlefs re-seeks before every write, so on
-	// FAT an intervening Seek sticks and the write lands where the caller left
-	// it. See Caps.AppendPerWrite and (*FATFS).mode.
+	// Where the write lands. O_APPEND moves it to the end of the file — before
+	// every write, which is what POSIX says, and not once at open, which is what
+	// FAT used to do and which moved the read offset with it.
 	off := mf.off
-	if mf.flag&os.O_APPEND != 0 && r.caps.AppendPerWrite && mf.state == hsOpen {
-		// littlefs moves an append handle to the end only when it is BEHIND the
-		// end — lfs_file_write guards the move with (file->pos < file->ctz.size).
-		// A handle seeked PAST the end therefore writes where it was left,
-		// sparsely, rather than being dragged back to the end of the file. This is
-		// not a detail worth guessing at: it is the difference between a 45 byte
-		// file and a 12 KiB one.
-		if size := int64(len(r.m.node(mf.path).data)); off < size {
+	if mf.flag&os.O_APPEND != 0 && mf.state == hsOpen {
+		size := int64(len(r.m.node(mf.path).data))
+		switch {
+		case !r.caps.AppendForwardOnly:
+			// POSIX: the write goes to the end, wherever the handle was left.
+			off = size
+		case off < size:
+			// littlefs moves an append handle to the end only when it is BEHIND the
+			// end — lfs_file_write guards the move with (file->pos < file->ctz.size).
+			// A handle seeked PAST the end therefore writes where it was left,
+			// sparsely, rather than being dragged back. This is not a detail worth
+			// guessing at: it is the difference between a 45 byte file and a 12 KiB
+			// one. See Caps.AppendForwardOnly.
 			off = size
 		}
 	}
@@ -521,7 +516,6 @@ func (r *runner) write(op Op) error {
 		return nil
 	}
 	node := r.m.node(mf.path)
-	r.grewOverHole(node, int64(len(node.data)), off) // The gap the write skipped over.
 	node.writeAt(buf, off)
 	mf.off = off + int64(got)
 	return nil
@@ -556,7 +550,6 @@ func (r *runner) writeAt(op Op) error {
 		return nil
 	}
 	node := r.m.node(mf.path)
-	r.grewOverHole(node, int64(len(node.data)), off) // The gap the write skipped over.
 	node.writeAt(buf, off)
 	// WriteAt must not disturb the seek offset either.
 	return nil
@@ -592,25 +585,13 @@ func (r *runner) seek(op Op) error {
 		return failure
 	}
 
-	// Seeking past the end is legal on os and on littlefs: the position simply
-	// goes there, and the hole materializes only when something writes into it.
-	//
-	// QUARANTINED BUG (FAT). FatFs f_lseek will not let the position exceed the
-	// size, and papers over the difference in two incompatible ways depending on
-	// how the file was opened: on a writable handle it EXTENDS the file to the
-	// requested offset, and on a read-only one it silently CLIPS the seek back to
-	// the end. Both come from the same place, so both live behind one flag. See
-	// Caps.SeekBoundedBySize.
-	node := r.m.node(mf.path)
-	grow := int64(-1)
-	if r.caps.SeekBoundedBySize && want > int64(len(node.data)) {
-		if mf.writable() {
-			grow = want
-		} else {
-			want = int64(len(node.data))
-		}
-	}
-
+	// Seeking past the end is legal, changes nothing on the device, and cannot
+	// fail: the position simply goes there, and the gap materializes only when
+	// something writes into it. Every backend now agrees, which they did not
+	// before — FatFs f_lseek refused to let its pointer exceed the file size and
+	// papered over the difference in two incompatible ways, extending the file on
+	// a writable handle and silently clipping the seek back to the end on a
+	// read-only one. Both are fixed upstream; the model enforces the POSIX answer.
 	if ok, failure := r.check(classOK, err); failure != nil || !ok {
 		return failure
 	}
@@ -618,11 +599,6 @@ func (r *runner) seek(op Op) error {
 		return r.fail("seek returned offset %d, want %d", got, want)
 	}
 	mf.off = want
-	if grow >= 0 {
-		// The bytes FAT just added to the file were never written by anyone.
-		r.grewOverHole(node, int64(len(node.data)), grow)
-		node.truncate(grow)
-	}
 	return nil
 }
 
@@ -648,18 +624,11 @@ func (r *runner) truncate(op Op) error {
 		r.poison() // Growing a file can run the device out of space.
 		return nil
 	}
-	// Truncate resizes the file but does not move the offset, so a handle left
-	// past the new end reads EOF and writes into the hole.
-	node := r.m.node(mf.path)
-	r.grewOverHole(node, int64(len(node.data)), size)
-	node.truncate(size)
-	if r.caps.TruncateMovesOffset && mf.off > size {
-		// QUARANTINED BUG (FAT). FatFs clamps the file pointer to the new size.
-		// os and littlefs leave it where the caller put it, so a truncate followed
-		// by a write puts the bytes where the caller asked for them rather than at
-		// the new end. See Caps.TruncateMovesOffset.
-		mf.off = size
-	}
+	// Truncate resizes the file and does not move the offset, so a handle left
+	// past the new end reads EOF, and a write there extends the file back out over
+	// a zero-filled gap. FAT used to clamp the offset down to the new size; that
+	// is fixed upstream and the model now enforces that it stays put.
+	r.m.node(mf.path).truncate(size)
 	return nil
 }
 

@@ -245,9 +245,9 @@ var (
 )
 
 // newFATHarness builds a harness around either FAT variant. They share a driver
-// and so share their [Caps]: every divergence quarantined below lives in the file
-// layer, above the point where FAT32 and exFAT part ways, and the fuzzer confirms
-// both variants exhibit all of them.
+// and so share their [Caps]: everything the fuzzer ever caught lived in the file
+// layer, above the point where FAT32 and exFAT part ways, and the fuzzer
+// confirmed both variants exhibited all of it.
 func newFATHarness(pristine *RAM, sectorSize int) *Harness {
 	bd := newRAMFrom(pristine)
 	fsys := new(filesystem.FATFS)

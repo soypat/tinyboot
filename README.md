@@ -60,24 +60,24 @@ GOMEMLIMIT=256MiB go test -run=^$ -fuzz=FuzzExFAT  -fuzztime=60s ./filesystem/
 GOMEMLIMIT=256MiB go test -run=^$ -fuzz=FuzzLittle -fuzztime=60s ./filesystem/
 ```
 
-### Known deviations from POSIX
-The fuzzer found these. In every row exactly one backend also disagrees with `os.File`, which is what makes them bugs rather than taste. They are quarantined behind `fsfuzz.Caps` flags and pinned by tests in [`divergence_test.go`](./filesystem/divergence_test.go) that assert the *wrong* behavior on purpose — fix one upstream and its test fails, which is the signal to delete the flag and the test together. A quarantine flag that outlives its bug is how a fuzzer goes quietly blind.
+### Deviations from POSIX the fuzzer found
+The fuzzer found these. In every row exactly one backend also disagreed with `os.File`, which is what made them bugs rather than taste. All but one are now fixed upstream in `fat`/`lfs`; the model enforces the correct behavior on every operation, and [`conformance_test.go`](./filesystem/conformance_test.go) pins each fix with an `os.File` arm as the referee.
 
-FAT32 and exFAT share a driver above the FAT itself, and every bug below reproduces identically on both — which is the evidence that they live in the file layer rather than in one variant's allocator.
+FAT32 and exFAT share a driver above the FAT itself, and every bug below reproduced identically on both — the evidence that they lived in the file layer rather than in one variant's allocator.
 
-| Behavior | POSIX (`os.File`) | FAT32 / exFAT (`fat`) | littlefs (`lfs`) | `Caps` flag |
-|---|---|---|---|---|
-| `Read`/`ReadAt` on an `O_WRONLY` handle | `EBADF` | denied | **returns the data** | `ReadIgnoresAccessMode` |
-| `Seek` past EOF on a writable handle | offset moves, file unchanged | **grows the file** | offset moves, file unchanged | `SeekBoundedBySize` |
-| `Seek` past EOF on a read-only handle | offset moves there | **clips to EOF, reports success** | offset moves there | `SeekBoundedBySize` |
-| `Truncate` while the offset is past the new size | offset unchanged | **offset moves to the new size** | offset unchanged | `TruncateMovesOffset` |
-| Reading a hole (grown over, never written) | zeros | **raw media contents** | zeros | `HolesAreGarbage` |
-| `Read` on a fresh `O_RDONLY｜O_APPEND` handle | reads from 0 | **EOF: the handle opens at EOF** | reads from 0 | `AppendPerWrite` |
-| `O_APPEND` write position | EOF before every write | **EOF once, at open — a later `Seek` sticks** | EOF before every write, but only moves *forward* | `AppendPerWrite` |
-| Name case | case-sensitive | **case-insensitive** (casefolds) | case-sensitive | `CaseInsensitive` |
+| Behavior | POSIX (`os.File`) | Was broken in | Status |
+|---|---|---|---|
+| `Read`/`ReadAt` on an `O_WRONLY` handle | `EBADF` | `lfs` returned the data | **fixed** in `lfs` |
+| `Seek` past EOF on a writable handle | offset moves, file unchanged | `fat` grew the file | **fixed**: virtual offset in `fat` |
+| `Seek` past EOF on a read-only handle | offset moves there | `fat` clipped to EOF, reported success | **fixed**: virtual offset in `fat` |
+| `Truncate` while the offset is past the new size | offset unchanged | `fat` moved it to the new size | **fixed** in `fat` |
+| Reading a hole (grown over, never written) | zeros | `fat` returned raw media contents | **fixed**: zero-fill by default, `fat.FSConfig{NoZeroFilling}` opts out |
+| `Read` on a fresh `O_RDONLY｜O_APPEND` handle | reads from 0 | `fat` opened the handle at EOF | **fixed**: `fat.ModeAppend` is per-write POSIX append |
+| `O_APPEND` write position | EOF before every write | `fat`: EOF once at open, a later `Seek` stuck | **fixed** in `fat`; `lfs` remains **forward-only** (`Caps.AppendForwardOnly`) |
+| Name case | case-sensitive | — | FAT is case-insensitive by design (`Caps.CaseInsensitive`) |
 
-The last row is a real capability difference and is modelled rather than quarantined. The rest are bugs.
+The last two rows carry the remaining `Caps` flags: real capability differences, modelled rather than quarantined. littlefs's append matches C littlefs (`lfs_file_write` only moves the position *forward* to EOF, never back), and diverging from the reference implementation for that corner is not worth it.
 
-`HolesAreGarbage` is the one that matters. FatFs grows a file by allocating clusters and never erasing them, so a hole returns whatever the flash last held — on a part that has ever deleted a file, that is the deleted file's contents, handed to a caller who never wrote them and was never given them.
+The hole bug was the one that mattered. FatFs grows a file by allocating clusters and never erasing them, so a hole returned whatever the flash last held — on a part that has ever deleted a file, that is the deleted file's contents, handed to a caller who never wrote them and was never given them. This is deliberate FatFs policy (the zeroing primitive exists and is used for directory clusters only), so `fat` now zero-fills by default and keeps the FatFs behavior behind `FSConfig{NoZeroFilling: true}` for byte-exact compatibility.
 
-The `O_APPEND` read bug is a good advertisement for the method: it needs a five-operation program — create with `O_APPEND`, write, close, reopen `O_RDONLY|O_APPEND`, read — and nobody sits down to write that test. FAT has no native append this package can use, so it emulates one by seeking to the end at open, and that seek moves the *read* offset too. POSIX says `O_APPEND` governs writes only. The file comes back empty, and it is not empty.
+The `O_APPEND` read bug is a good advertisement for the method: it needs a five-operation program — create with `O_APPEND`, write, close, reopen `O_RDONLY|O_APPEND`, read — and nobody sits down to write that test. POSIX says `O_APPEND` governs writes only; the old open-time seek moved the *read* offset too, and the file came back empty when it was not.

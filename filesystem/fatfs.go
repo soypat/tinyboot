@@ -1,7 +1,6 @@
 package filesystem
 
 import (
-	"io"
 	"io/fs"
 	"os"
 
@@ -39,30 +38,23 @@ func (fs *FATFS) Mount(bd fat.BlockDevice, blockSize int, mode fat.Mode) error {
 //     the caller to open the existing file and Truncate(0) it instead, so a
 //     missing file still fails.
 //
-//   - O_APPEND. [fat.ModeOpenAppend] looks like a match but is not: its value
-//     includes the open-always bit, so it silently creates a missing file even
-//     without O_CREATE. postSeekEnd instead asks the caller to seek to the end
-//     after opening, which is what ModeOpenAppend does internally anyway, minus
-//     the unwanted create. This method never returns ModeOpenAppend.
+//   - O_APPEND maps to [fat.ModeAppend], which is POSIX append: every write
+//     goes to the end of the file and reads start at the beginning. Not
+//     [fat.ModeOpenAppend] — that one includes the open-always bit and would
+//     silently create a missing file even without O_CREATE.
 //
-// Two divergences from [os.OpenFile] remain and cannot be fixed here:
-//
-//   - Append is not POSIX append. Both FAT and this emulation seek to the end
-//     once, at open. They do not re-seek before every write, so a caller that
-//     interleaves Seek and Write on an O_APPEND handle overwrites data where os
-//     and littlefs would have appended it. littlefs is the one that gets this
-//     right; see (*LittleFS).openFlags.
+// One divergence from [os.OpenFile] remains and cannot be fixed here:
 //
 //   - perm is ignored. FAT stores only a read-only attribute and exports no
 //     chmod, so permissions cannot be applied at create time. Read back,
 //     fat.FileInfo.Mode synthesizes 0666, or 0444 when that attribute is set.
-func (*FATFS) mode(flag int, perm fs.FileMode) (m fat.Mode, postTrunc, postSeekEnd bool, err error) {
+func (*FATFS) mode(flag int, perm fs.FileMode) (m fat.Mode, postTrunc bool, err error) {
 	if flag&^supportedFlags != 0 {
-		return 0, false, false, errUnsupportedFlag
+		return 0, false, errUnsupportedFlag
 	}
 	read, write, err := access(flag)
 	if err != nil {
-		return 0, false, false, err
+		return 0, false, err
 	}
 	if read {
 		m |= fat.ModeRead
@@ -70,11 +62,14 @@ func (*FATFS) mode(flag int, perm fs.FileMode) (m fat.Mode, postTrunc, postSeekE
 	if write {
 		m |= fat.ModeWrite
 	}
+	if flag&os.O_APPEND != 0 {
+		m |= fat.ModeAppend
+	}
 	create := flag&os.O_CREATE != 0
 	excl := flag&os.O_EXCL != 0
 	trunc := flag&os.O_TRUNC != 0
 	if excl && !create {
-		return 0, false, false, errExclNoCreate
+		return 0, false, errExclNoCreate
 	}
 	switch {
 	case create && excl:
@@ -87,13 +82,14 @@ func (*FATFS) mode(flag int, perm fs.FileMode) (m fat.Mode, postTrunc, postSeekE
 		m |= fat.ModeOpenExisting
 		postTrunc = trunc
 	}
-	return m, postTrunc, flag&os.O_APPEND != 0, nil
+	return m, postTrunc, nil
 }
+
 
 // OpenFile implements [FSNoAlloc], mirroring [os.OpenFile]. See (*FATFS).mode for how
 // flag is translated and why perm is ignored.
 func (fsys *FATFS) OpenFile(f *fat.File, path string, flag int, perm fs.FileMode) error {
-	mode, postTrunc, postSeekEnd, err := fsys.mode(flag, perm)
+	mode, postTrunc, err := fsys.mode(flag, perm)
 	if err != nil {
 		return err
 	}
@@ -103,9 +99,6 @@ func (fsys *FATFS) OpenFile(f *fat.File, path string, flag int, perm fs.FileMode
 	}
 	if postTrunc {
 		err = f.Truncate(0)
-	}
-	if err == nil && postSeekEnd {
-		_, err = f.Seek(0, io.SeekEnd)
 	}
 	if err != nil {
 		f.Close() // Never leak an open handle out of a failed open.

@@ -3,6 +3,8 @@ package filesystem
 import (
 	"os"
 	"testing"
+
+	"github.com/soypat/fat"
 )
 
 // FuzzFlagConversion is the cheapest high-value target in the package, and it is
@@ -44,7 +46,7 @@ func FuzzFlagConversion(f *testing.F) {
 	f.Fuzz(func(t *testing.T, flag64 int64) {
 		flag := int(flag64)
 
-		_, postTrunc, postSeekEnd, fatErr := fatfs.mode(flag, 0)
+		mode, postTrunc, fatErr := fatfs.mode(flag, 0)
 		_, lfsErr := lfs.openFlags(flag, 0)
 
 		if (fatErr == nil) != (lfsErr == nil) {
@@ -56,16 +58,21 @@ func FuzzFlagConversion(f *testing.F) {
 			return
 		}
 
-		// FAT emulates the two flags it has no mode bit for, after the open. The
-		// fixups it asks for must correspond to the flags that were requested, and
-		// only to those: a postTrunc on a flag set without O_TRUNC would silently
-		// empty a file the caller asked to keep, and a missing one would leave a
-		// file the caller asked to empty.
+		// FAT has no mode bit for O_TRUNC without O_CREATE, so it asks the caller to
+		// truncate after the open. The fixup must correspond to the flags that were
+		// requested and only to those: a postTrunc on a flag set without O_TRUNC
+		// would silently empty a file the caller asked to keep, and a missing one
+		// would leave a file the caller asked to empty.
 		if want := flag&os.O_TRUNC != 0 && flag&os.O_CREATE == 0; postTrunc != want {
 			t.Errorf("flag %#x (%s): postTrunc = %v, want %v", flag, flagNames(flag), postTrunc, want)
 		}
-		if want := flag&os.O_APPEND != 0; postSeekEnd != want {
-			t.Errorf("flag %#x (%s): postSeekEnd = %v, want %v", flag, flagNames(flag), postSeekEnd, want)
+		// And it must never ask fat for its own append, whatever the flags say.
+		// fat.ModeOpenAppend carries the open-always bit, so it would create a file
+		// that O_APPEND alone must not create — and it seeks to the end at open,
+		// which POSIX append must not do. O_APPEND is emulated per write instead.
+		if mode&fat.ModeOpenAppend == fat.ModeOpenAppend {
+			t.Errorf("flag %#x (%s): mode %#x contains ModeOpenAppend, which creates the file "+
+				"and moves the read offset", flag, flagNames(flag), mode)
 		}
 	})
 }

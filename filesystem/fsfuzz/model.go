@@ -89,24 +89,21 @@ type Caps struct {
 	// CaseInsensitive folds names, as FAT does and littlefs does not.
 	CaseInsensitive bool
 
-	// AppendPerWrite is true POSIX append: seek to the end before every write, and
-	// leave the offset alone the rest of the time. littlefs does this natively.
+	// AppendForwardOnly: O_APPEND drags the file position forward to the end of
+	// the file before a write, but never drags it BACK. A handle deliberately
+	// seeked PAST the end writes where it was left, sparsely, instead of at the
+	// end.
 	//
-	// FAT has no native append that this package can use, so (*FATFS).OpenFile
-	// emulates one by seeking to the end ONCE, at open. That gets a plain
-	// open-and-append right and everything else wrong:
+	// littlefs only, and it is not a port bug: lfs_file_write guards the move with
+	// (file->pos < file->ctz.size), and the Go library copies the C library
+	// faithfully. POSIX says a write on an O_APPEND handle always goes to the end,
+	// so this is upstream littlefs departing from POSIX, and fixing it here would
+	// mean diverging from the reference for a case you have to go out of your way
+	// to reach. Modeled instead. See TestAppendMovesOnlyBackwards.
 	//
-	//   - A Seek on an O_APPEND handle sticks, so the next write lands wherever
-	//     the caller seeked instead of at the end.
-	//   - The open-time seek moves the READ offset too. A handle opened
-	//     O_RDONLY|O_APPEND starts at the end of the file and reads EOF, where os
-	//     and littlefs start it at zero and hand back the file. POSIX is explicit
-	//     that O_APPEND governs writes only.
-	//
-	// The second one is a bug, found by the fuzzer and pinned by
-	// TestDivergenceAppendMovesReadOffset. It is modeled rather than quarantined
-	// because this flag already had to exist to describe the first one.
-	AppendPerWrite bool
+	// FAT does not set this: fat.ModeAppend is the POSIX append — every write
+	// goes to the end, wherever the position was.
+	AppendForwardOnly bool
 
 	// AliasedOpen allows more than one live handle on the same path. littlefs
 	// explicitly does not support it, so programs that try are skipped.
@@ -118,65 +115,34 @@ type Caps struct {
 
 	// RenameOverwrite allows renaming onto an existing destination.
 	RenameOverwrite bool
-
-	// The four fields below are QUARANTINE FLAGS, not capabilities. Each one
-	// names a bug this fuzzer found, and each is set on exactly the backend that
-	// gets the behavior wrong; the other backend, and os.File, do the right
-	// thing. They are here so the fuzzer stops re-reporting known findings on
-	// every other program and gets on with looking for the next one.
-	//
-	// Every one of them is pinned by a test in divergence_test.go that asserts
-	// the CURRENT, WRONG behavior. Fix the underlying bug and that test fails,
-	// which is the signal to delete the flag and the test together. A quarantine
-	// flag that outlives its bug is how a fuzzer goes quietly blind.
-
-	// ReadIgnoresAccessMode: Read and ReadAt return data through a handle opened
-	// os.O_WRONLY instead of refusing. littlefs only. See divergence_test.go.
-	ReadIgnoresAccessMode bool
-
-	// SeekBoundedBySize: the file position is not allowed to exceed the file
-	// size. FatFs f_lseek enforces this in two incompatible ways depending on how
-	// the file was opened — on a writable handle it EXTENDS the file out to the
-	// requested offset, and on a read-only handle it CLIPS the seek back to the
-	// end and reports the clipped offset as if it had succeeded. os and littlefs
-	// do neither: the position goes where it was asked to go, and the hole
-	// appears only when something writes into it. FAT only.
-	SeekBoundedBySize bool
-
-	// TruncateMovesOffset: Truncate clamps the file offset to the new size
-	// instead of leaving it where the caller put it. FAT only.
-	TruncateMovesOffset bool
-
-	// HolesAreGarbage: a region a file grows over without anything writing to it
-	// reads back as whatever was on the media, rather than as zeros. FAT only,
-	// and the most serious of these: FatFs allocates the clusters and does not
-	// erase them, so a read through the hole returns the raw contents of the
-	// device. On the RAM device here that is the 0xff of erased flash, which is
-	// harmless; on a real part it is whatever those blocks last held, which may
-	// be the contents of a deleted file. os and littlefs both zero-fill.
-	HolesAreGarbage bool
 }
 
 // CapsFAT and CapsLittle describe the backends this repository ships.
 //
 // CapsFAT covers both FAT32 and exFAT: they are one driver above the FAT itself,
-// and the fuzzer confirms every bug below reproduces identically on both. Long
+// and every divergence the fuzzer has found reproduced identically on both. Long
 // file names cap at 255 on either.
+//
+// There are no quarantine flags left. There used to be four, each naming a bug
+// this fuzzer found and each telling the model to expect the wrong answer so the
+// fuzzer would stop re-reporting it and go looking for the next one:
+//
+//	ReadIgnoresAccessMode  littlefs returned data through an O_WRONLY handle
+//	SeekBoundedBySize      FAT grew the file on a seek past EOF, and clipped a read-only one
+//	TruncateMovesOffset    FAT clamped the file offset to the new size
+//	HolesAreGarbage        FAT handed back the raw media where a file had grown over it
+//
+// All four are fixed upstream, in soypat/lfs and soypat/fat, so the model now
+// asserts the correct behavior on every one of them and the fuzzer enforces it.
+// That is what a quarantine is for: it is scaffolding, and it comes down.
 var (
 	CapsFAT = Caps{
 		MaxNameLen:      255,
 		CaseInsensitive: true,
-		AppendPerWrite:  false, // Seeks to end once, at open. See the field: it is a bug.
-
-		SeekBoundedBySize:   true, // BUG, quarantined. See Caps and divergence_test.go.
-		TruncateMovesOffset: true, // BUG, quarantined.
-		HolesAreGarbage:     true, // BUG, quarantined.
 	}
 	CapsLittle = Caps{
-		MaxNameLen:     255,
-		AppendPerWrite: true, // Real POSIX append.
-
-		ReadIgnoresAccessMode: true, // BUG, quarantined.
+		MaxNameLen:        255,
+		AppendForwardOnly: true, // Upstream littlefs, faithfully ported. See the field.
 	}
 )
 
@@ -206,19 +172,6 @@ const (
 type mnode struct {
 	exists bool
 	dir    bool
-
-	// tainted marks a file that has grown over a hole on a backend where holes
-	// read back as garbage (see Caps.HolesAreGarbage). The model cannot say what
-	// those bytes are — that is the whole complaint — so the content oracle stops
-	// checking this file's bytes for the rest of the run. Everything structural
-	// still applies: its size, the errors it reports, where EOF is.
-	//
-	// It is per file and sticky rather than a per-byte map of which bytes are
-	// known. A bitmap would recover byte checking on the parts of a tainted file
-	// that were later written, at the cost of carrying a bit per byte of every
-	// file in the model. The taint is rare, so the coarse version is the right
-	// trade.
-	tainted bool
 
 	// data is retained across runs, deliberately. Zeroing its length rather than
 	// dropping the slice means a fuzz iteration reuses the backing array the last
@@ -271,7 +224,6 @@ func (m *model) reset(caps Caps) {
 	for i := range m.nodes {
 		m.nodes[i].exists = false
 		m.nodes[i].dir = false
-		m.nodes[i].tainted = false
 		m.nodes[i].data = m.nodes[i].data[:0] // Keep the backing array.
 	}
 	m.files = [NumFiles]mfile{}
@@ -381,68 +333,57 @@ const supportedFlags = os.O_RDONLY | os.O_WRONLY | os.O_RDWR |
 	os.O_CREATE | os.O_EXCL | os.O_TRUNC | os.O_APPEND
 
 // wantOpen is the model's verdict on an OpenFile: the class the implementation
-// must report, and — when it must succeed — the file offset the handle starts at.
-func (m *model) wantOpen(p string, flag int) (want class, off int64) {
+// must report.
+//
+// It says nothing about the resulting file offset because there is nothing to
+// say: a fresh handle starts at zero. It used to return an offset, because FAT
+// emulated O_APPEND by seeking to the end at open, which moved the offset a Read
+// would start from. POSIX says O_APPEND governs writes only, and it now does.
+func (m *model) wantOpen(p string, flag int) (want class) {
 	if flag&^supportedFlags != 0 {
-		return classOther, 0 // errUnsupportedFlag: not mapped to a sentinel.
+		return classOther // errUnsupportedFlag: not mapped to a sentinel.
 	}
 	switch flag & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) {
 	case os.O_RDONLY, os.O_WRONLY, os.O_RDWR:
 	default:
-		return classOther, 0 // errBadAccessMode.
+		return classOther // errBadAccessMode.
 	}
-	create, excl, trunc := flag&os.O_CREATE != 0, flag&os.O_EXCL != 0, flag&os.O_TRUNC != 0
+	create, excl := flag&os.O_CREATE != 0, flag&os.O_EXCL != 0
 	if excl && !create {
-		return classOther, 0 // errExclNoCreate.
+		return classOther // errExclNoCreate.
 	}
 	if m.nameTooLong(p) {
-		return classOther, 0
+		return classOther
 	}
 
 	n := m.node(p)
 	switch {
 	case n != nil && n.exists && n.dir:
-		return classOther, 0 // Opening a directory as a file.
+		return classOther // Opening a directory as a file.
 	case n != nil && n.exists && create && excl:
-		return classExist, 0
+		return classExist
 	case (n == nil || !n.exists) && !create:
-		return classNotExist, 0
+		return classNotExist
 	case n == nil || !n.exists:
 		// Creating it. The parent has to be there, and has to be a directory.
 		if !m.parentExists(p) {
-			return classNotExist, 0
+			return classNotExist
 		}
 		if !m.parentOK(p) {
-			return classOther, 0 // The parent is a regular file.
+			return classOther // The parent is a regular file.
 		}
 	}
-
-	// The open succeeds. Work out the resulting size and offset.
-	size := int64(0)
-	if n.exists && !trunc {
-		size = int64(len(n.data))
-	}
-	if flag&os.O_APPEND != 0 && !m.caps.AppendPerWrite {
-		// FAT has no native append, so (*FATFS).OpenFile emulates it by seeking to
-		// the end once, at open — which moves the READ offset too, and POSIX says
-		// O_APPEND must not. A handle opened O_RDONLY|O_APPEND starts at the end of
-		// the file and reads EOF. os and littlefs both start it at zero and only
-		// move to the end when something writes. See Caps.AppendPerWrite and
-		// TestDivergenceAppendMovesReadOffset.
-		off = size
-	}
-	return classOK, off
+	return classOK
 }
 
 // applyOpen commits a successful open to the model.
-func (m *model) applyOpen(slot int, p string, flag int, off int64) {
+func (m *model) applyOpen(slot int, p string, flag int) {
 	n := m.node(p)
 	n.exists, n.dir = true, false
 	if flag&os.O_TRUNC != 0 {
 		n.data = n.data[:0]
-		n.tainted = false // Nothing is left in it to be unknown.
 	}
-	m.files[slot] = mfile{state: hsOpen, path: p, off: off, flag: flag}
+	m.files[slot] = mfile{state: hsOpen, path: p, off: 0, flag: flag}
 }
 
 func (f *mfile) readable() bool {
