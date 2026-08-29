@@ -234,7 +234,7 @@ func DecodeHeader(buf []byte) (header Header, n int, err error) {
 	switch header.Class {
 	case Class32:
 		n = headerSize32
-		header.Entry = uint64(bo.Uint16(buf[offEntry32:]))
+		header.Entry = uint64(bo.Uint32(buf[offEntry32:]))
 		header.Phoff = uint64(bo.Uint32(buf[offPhoff32:]))
 		header.Phentsize = uint16(bo.Uint16(buf[offPhentsize32:]))
 		header.Phnum = bo.Uint16(buf[offPhnum32:])
@@ -284,7 +284,7 @@ func (h Header) Put(b []byte) (n int, err error) {
 	switch h.Class {
 	case Class32:
 		n = headerSize32
-		bo.PutUint16(b[offEntry32:], uint16(h.Entry))
+		bo.PutUint32(b[offEntry32:], uint32(h.Entry))
 		bo.PutUint32(b[offPhoff32:], uint32(h.Phoff))
 		bo.PutUint16(b[offPhentsize32:], h.Phentsize)
 		bo.PutUint16(b[offPhnum32:], h.Phnum)
@@ -637,14 +637,16 @@ func DecodeRel(b []byte, class Class, bo binary.ByteOrder) (rel Rel, n int, err 
 	if (class == Class32 && len(b) < 4*2) || (class == Class64 && len(b) < 8*2) {
 		return Rel{}, 0, io.ErrShortBuffer
 	}
+	// ELF defines Elf32_Rel{ r_offset; r_info } and Elf64_Rel{ r_offset; r_info }:
+	// the offset comes first in both classes.
 	switch class {
 	case Class32:
-		rel.Info = uint64(bo.Uint32(b))
-		rel.Off = uint64(bo.Uint32(b[4:]))
+		rel.Off = uint64(bo.Uint32(b))
+		rel.Info = uint64(bo.Uint32(b[4:]))
 		n = 8
 	case Class64:
-		rel.Info = bo.Uint64(b)
-		rel.Off = bo.Uint64(b[8:])
+		rel.Off = bo.Uint64(b)
+		rel.Info = bo.Uint64(b[8:])
 		n = 16
 	default:
 		return Rel{}, 0, errBadClass

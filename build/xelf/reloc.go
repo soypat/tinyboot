@@ -87,6 +87,37 @@ func canApplyRelocation(sym Sym) bool {
 	return sec != SecIdxUndef && sec < SecIdxReserveLo
 }
 
+// RelocationsFor returns the relocation section targeting the section at index
+// target, reporting whether one was found.
+//
+// ELF links a relocation section to the section it modifies through sh_info.
+// Honoring that link matters: applying an unrelated section's relocations (say
+// .rela.dyn, which targets .got and .data) onto .debug_info silently corrupts
+// the target rather than failing.
+func (f *File) RelocationsFor(target int) (FileSection, bool) {
+	nsect := f.NumSections()
+	for i := 0; i < nsect; i++ {
+		s, err := f.Section(i)
+		if err != nil {
+			return FileSection{}, false
+		}
+		sh := s.SectionHeader()
+		if sh.Type != SecTypeRel && sh.Type != SecTypeRelA {
+			continue
+		}
+		if int(sh.Info) == target {
+			return s, true
+		}
+	}
+	return FileSection{}, false
+}
+
+// fitsAt reports whether a size-byte field starting at off lies entirely within b.
+// Phrased to avoid overflowing off+size, since off comes from an untrusted file.
+func fitsAt(b []byte, off, size uint64) bool {
+	return uint64(len(b)) >= size && off <= uint64(len(b))-size
+}
+
 func applyRelocationsARM(dst []byte, rels []byte, syms []Sym, bo binary.ByteOrder) (err error) {
 	if len(rels)%8 != 0 {
 		return errors.New("length of relocation section not multiple of 8")
@@ -109,7 +140,7 @@ func applyRelocationsARM(dst []byte, rels []byte, syms []Sym, bo binary.ByteOrde
 		sym := &syms[symNo-1]
 		switch t {
 		case RARMABS32:
-			if rel.Off+4 >= uint64(len(dst)) {
+			if !fitsAt(dst, rel.Off, 4) {
 				fail |= relocFailOOB
 				continue
 			}
@@ -156,7 +187,7 @@ func applyRelocationsAMD64(dst []byte, relas []byte, syms []Sym, bo binary.ByteO
 		// of the form S + A (symbol plus addend).
 		switch t {
 		case Rx86_6464:
-			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
+			if !fitsAt(dst, rela.Off, 8) || rela.Addend < 0 {
 				fail |= relocFailOOB
 				continue
 			}
@@ -164,7 +195,7 @@ func applyRelocationsAMD64(dst []byte, relas []byte, syms []Sym, bo binary.ByteO
 			bo.PutUint64(dst[rela.Off:rela.Off+8], val64)
 
 		case Rx86_6432:
-			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
+			if !fitsAt(dst, rela.Off, 4) || rela.Addend < 0 {
 				fail |= relocFailOOB
 				continue
 			}

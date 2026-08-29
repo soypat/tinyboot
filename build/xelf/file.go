@@ -161,7 +161,7 @@ func (f *File) Header() Header {
 
 // Prog returns the program at progIdx index.
 func (f *File) Prog(progIdx int) (FileProg, error) {
-	if progIdx >= len(f.sections) || progIdx < 0 {
+	if progIdx >= len(f.progs) || progIdx < 0 {
 		return FileProg{}, errors.New("OOB/negative prog index")
 	}
 	return FileProg{
