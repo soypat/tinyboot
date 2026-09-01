@@ -20,6 +20,8 @@ There are two main top level packages:
 
 - [`build`](./build): Concerns manipulation of computer program formats such as ELF and UF2.
     - [`build/elfutil`](./build/elfutil): Manipulation of ELF files that works on top of `debug/elf` standard library package.
+    - [`build/xelf`](./build/xelf): ELF reader written from scratch, with bounded allocation. Unlike `debug/elf` it never materializes section bodies or names unless asked, and it can encode as well as decode.
+    - [`build/xdwarf`](./build/xdwarf): DWARF line-number reader in the same style, used to map addresses back to source files and lines.
     - [`build/uf2`](./build/uf2): Manipulation of Microsoft's UF2 format
 
 - [`filesystem`](./filesystem): Portable `io/fs`-like API over embedded filesystems (FAT12/16/32 and exFAT via [`soypat/fat`](https://github.com/soypat/fat), littlefs via [`soypat/lfs`](https://github.com/soypat/lfs)).
@@ -27,6 +29,28 @@ There are two main top level packages:
 
 ## picobin tool
 picobin tool permits users to inspect RP2350 and RP2040 binaries which are structured according to Raspberry Pi's picobin format.
+
+## bindiff tool
+`bindiff` answers where the bytes of a firmware image went, and what a change cost.
+
+```sh
+go build ./cmd/bindiff
+
+bindiff profile firmware.elf                  # every byte of the file, by section
+bindiff -kind=package -mem profile fw.elf     # RAM+flash footprint, by Go package
+bindiff -kind=line -mem diff old.elf new.elf  # which source lines grew
+bindiff -json diff old.elf new.elf
+bindiff -threshold=1024 diff old.elf new.elf  # exits non-zero if it grew too much
+```
+
+Granularity is chosen with `-kind`: `segment`, `section`, `symbol`, `package`, `file` or `line`. The first three need no debug information; `package` works because TinyGo emits package-qualified symbol names; `file` and `line` read DWARF through `build/xdwarf`.
+
+Two properties are worth relying on, and both are enforced by tests:
+
+- **Every level reconciles.** The rows of a report sum to the thing they describe — a section profile totals the exact size of the file, ELF headers and inter-section padding included. Where the available information does not cover everything, the shortfall appears as an explicit `[unattributed]` row rather than vanishing. This matters more than it sounds: symbols cover only 92–97% of `.text` on the binaries in `testdata`, so a tool that quietly dropped the rest would misattribute several percent of the image.
+- **The levels agree with each other.** A binary's sections, its symbols, their packages and their source files are four views of one total, and they are checked against each other.
+
+`-mem` switches from file bytes to run-time footprint, which is the difference between what costs flash and what costs RAM: `.bss` occupies no file bytes, and a `.heap` reservation can dwarf everything else in the image.
 
 ## Fuzz testing filesystems
 `filesystem/fsfuzz` fuzzes a filesystem by running it against an in-memory reference model and comparing every result. Randomness is kept out of the fuzz target:

@@ -161,7 +161,7 @@ func (f *File) Header() Header {
 
 // Prog returns the program at progIdx index.
 func (f *File) Prog(progIdx int) (FileProg, error) {
-	if progIdx >= len(f.sections) || progIdx < 0 {
+	if progIdx >= len(f.progs) || progIdx < 0 {
 		return FileProg{}, errors.New("OOB/negative prog index")
 	}
 	return FileProg{
@@ -225,6 +225,9 @@ func (fs FileSection) ptr() *section {
 	return &fs.f.sections[fs.sindex]
 }
 
+// Index returns the index of the FileSection within the file among sections.
+func (fs FileSection) Index() int { return fs.sindex }
+
 // SectionHeader returns the section's header.
 func (fs FileSection) SectionHeader() SectionHeader {
 	return fs.ptr().SectionHeader
@@ -251,8 +254,8 @@ func (fs FileSection) Name() (string, error) {
 	return string(str), nil
 }
 
-// Open returns a new [io.ReadSeeker] reading the ELF section body.
-func (fs FileSection) Open() io.ReadSeeker {
+// Open returns a new [io.SectionReader] reading the ELF section body.
+func (fs FileSection) Open() *io.SectionReader {
 	s := fs.ptr()
 	if s.Type == SecTypeNobits {
 		return io.NewSectionReader(&nobitsSectionReader{}, 0, int64(s.SizeOnFile))
