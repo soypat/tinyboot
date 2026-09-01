@@ -354,7 +354,9 @@ func TestThresholdGate(t *testing.T) {
 // asserts relationships rather than byte counts.
 func TestFixturePairDiff(t *testing.T) {
 	const a, b = "testdata/blinky-a.elf", "testdata/blinky-b.elf"
-
+	if _, err := os.Stat(a); err != nil {
+		t.Skip()
+	}
 	t.Run("sections grow", func(t *testing.T) {
 		oldEntries, oldSize := profileFixture(t, a, Flags{kind: KindSection})
 		newEntries, newSize := profileFixture(t, b, Flags{kind: KindSection})
