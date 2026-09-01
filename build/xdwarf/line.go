@@ -728,9 +728,9 @@ func (u *LineUnit) Rows(yield func(r Row) bool) {
 	var c streamCursor
 	c.config(u.sec.Line, u.win, u.progStart, u.progEnd, u.sec.byteOrder())
 
-	// reset returns the state machine to its documented initial state, which
-	// applies at the start of the unit and after every end_sequence.
-	var row Row
+	// The state machine starts in its documented initial state, which also
+	// applies again after every end_sequence.
+	row := u.resetRow()
 	for c.err == nil && c.pos() < u.progEnd {
 		opcode := c.u8()
 		if c.err != nil {
@@ -740,7 +740,7 @@ func (u *LineUnit) Rows(yield func(r Row) bool) {
 		case opcode >= u.opBase:
 			// Special opcode: encodes an address and line delta together.
 			adj := uint64(opcode - u.opBase)
-			row.Address = u.advance(adj / uint64(u.lineRnge))
+			row.Address += u.advance(adj / uint64(u.lineRnge))
 			row.Line = uint32(int64(row.Line) + int64(u.lineBase) + int64(adj%uint64(u.lineRnge)))
 			if !yield(row) {
 				return
@@ -795,7 +795,7 @@ func (u *LineUnit) Rows(yield func(r Row) bool) {
 				}
 				row.EndSequence = false
 			case LineOpAdvancePC:
-				row.Address = u.advance(c.uleb())
+				row.Address += u.advance(c.uleb())
 			case LineOpAdvanceLine:
 				row.Line = uint32(int64(row.Line) + c.sleb())
 			case LineOpSetFile:
@@ -807,7 +807,7 @@ func (u *LineUnit) Rows(yield func(r Row) bool) {
 			case LineOpSetBasicBlock:
 				// No state this package tracks.
 			case LineOpConstAddPC:
-				row.Address = u.advance(uint64(255-u.opBase) / uint64(u.lineRnge))
+				row.Address += u.advance(uint64(255-u.opBase) / uint64(u.lineRnge))
 			case LineOpFixedAdvancePC:
 				// Deliberately not scaled by minimum_instruction_length.
 				row.Address += uint64(c.u16())

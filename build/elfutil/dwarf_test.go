@@ -85,21 +85,17 @@ func walk(t *testing.T, sec xdwarf.Sections, size int64, aux []byte) []lineRow {
 		if err != nil {
 			t.Fatalf("unit at %d: %s", off, err)
 		}
-		err = u.VisitRows(func(row xdwarf.Row) error {
+		for row := range u.Rows {
 			out := lineRow{addr: row.Address, line: row.Line, end: row.EndSequence}
 			if !row.EndSequence {
 				var err error
 				nameBuf, err = u.AppendFileName(nameBuf[:0], row.File)
 				if err != nil {
-					return err
+					t.Fatalf("unit at %d: naming row file: %s", off, err)
 				}
 				out.file = string(nameBuf)
 			}
 			rows = append(rows, out)
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("unit at %d: %s", off, err)
 		}
 		off = next
 	}
@@ -185,7 +181,10 @@ func TestStreamBufferTooSmall(t *testing.T) {
 		var next int64
 		next, err = xdwarf.DecodeLineUnit(&u, sec, off, size, auxBuf)
 		if err == nil {
-			err = u.VisitRows(func(xdwarf.Row) error { return nil })
+			// LineUnit.Rows reports no error of its own, so a rewind that
+			// happens mid-program is only visible on the next unit's decode.
+			for range u.Rows {
+			}
 		}
 		if err != nil {
 			break

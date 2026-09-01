@@ -38,18 +38,14 @@ func BenchmarkLineRowsXdwarf(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			err = u.VisitRows(func(r xdwarf.Row) error {
+			for r := range u.Rows {
 				if !r.EndSequence {
 					nameBuf, err = u.AppendFileName(nameBuf[:0], r.File)
 					if err != nil {
-						return err
+						b.Fatal(err)
 					}
 				}
 				rows++
-				return nil
-			})
-			if err != nil {
-				b.Fatal(err)
 			}
 			off = next
 		}

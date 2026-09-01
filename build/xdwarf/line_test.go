@@ -116,20 +116,16 @@ func collect(t *testing.T, sec xdwarf.Sections, size int64, compDirs map[uint64]
 		if dir, ok := compDirs[uint64(u.Offset)]; ok && u.Version < 5 {
 			u.CompDir = dir
 		}
-		err = u.VisitRows(func(r xdwarf.Row) error {
+		for r := range u.Rows {
 			out := row{addr: r.Address, line: r.Line, end: r.EndSequence}
 			if !r.EndSequence {
 				nameBuf, err = u.AppendFileName(nameBuf[:0], r.File)
 				if err != nil {
-					return err
+					t.Fatalf("unit at %d: naming row file: %s", off, err)
 				}
 				out.file = xdwarf.CleanPath(string(nameBuf))
 			}
 			rows = append(rows, out)
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("unit at %d: visiting rows: %s", off, err)
 		}
 		off = next
 	}
@@ -260,22 +256,21 @@ func TestLineUnitVersions(t *testing.T) {
 	t.Logf("line unit versions: %v", seen)
 }
 
-func TestVisitRowsStop(t *testing.T) {
+// TestRowsStop pins the iterator's half of the range-over-func contract: once
+// yield returns false the walk must return without calling it again. Calling it
+// again is a runtime panic, not a quiet bug.
+func TestRowsStop(t *testing.T) {
 	sec, size := loadSections(t, "../../testdata/helloc.elf")
 	var u xdwarf.LineUnit
 	if _, err := xdwarf.DecodeLineUnit(&u, sec, 0, size, make([]byte, defaultAux)); err != nil {
 		t.Fatal(err)
 	}
 	n := 0
-	err := u.VisitRows(func(r xdwarf.Row) error {
+	for range u.Rows {
 		n++
 		if n == 3 {
-			return xdwarf.ErrStopVisit
+			break
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("ErrStopVisit surfaced as an error: %s", err)
 	}
 	if n != 3 {
 		t.Errorf("visited %d rows after stopping at 3", n)
@@ -351,15 +346,15 @@ func TestDecodeAllocationsSteadyState(t *testing.T) {
 	var nameBuf []byte
 	var rows int
 	var visitErr error
-	visit := func(r xdwarf.Row) error {
+	visit := func(r xdwarf.Row) bool {
 		if !r.EndSequence {
 			nameBuf, visitErr = u.AppendFileName(nameBuf[:0], r.File)
 			if visitErr != nil {
-				return visitErr
+				return false
 			}
 		}
 		rows++
-		return nil
+		return true
 	}
 	aux := make([]byte, defaultAux)
 	walk := func() {
@@ -368,8 +363,11 @@ func TestDecodeAllocationsSteadyState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unit at %d: %s", off, err)
 			}
-			if err := u.VisitRows(visit); err != nil {
-				t.Fatalf("unit at %d: %s", off, err)
+			// Rows is called directly rather than ranged over so the hoisted
+			// visit function stays the one the walk uses.
+			u.Rows(visit)
+			if visitErr != nil {
+				t.Fatalf("unit at %d: %s", off, visitErr)
 			}
 			off = next
 		}
