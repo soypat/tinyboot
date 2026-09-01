@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/soypat/archive/zlib"
+
 	"github.com/soypat/tinyboot/build/elfutil"
 	"github.com/soypat/tinyboot/build/xdwarf"
 	"github.com/soypat/tinyboot/build/xelf"
@@ -29,7 +31,7 @@ type lineIndex struct {
 // the next row in the same sequence, and an end_sequence row closes the range
 // before it. Ranges from different sequences may interleave in address order,
 // so the whole set is sorted once at the end.
-func buildLineIndex(sec xdwarf.Sections, size int64) (*lineIndex, error) {
+func buildLineIndex(sec xdwarf.Sections, size int64, aux []byte) (*lineIndex, error) {
 	idx := &lineIndex{}
 	if sec.Line == nil || size == 0 {
 		return idx, nil
@@ -38,19 +40,11 @@ func buildLineIndex(sec xdwarf.Sections, size int64) (*lineIndex, error) {
 	// across thousands of rows.
 	interned := make(map[string]string, 64)
 	var nameBuf []byte
-	// One unit and one scratch buffer serve the whole section. A header too
-	// large for aux reports the size it needs, so the buffer grows to the
-	// biggest header the binary has and then stops.
+	// One unit serves the whole section, its tables reused rather than rebuilt.
 	var u xdwarf.LineUnit
-	aux := make([]byte, 4096)
 
 	for off := int64(0); off < size; {
 		next, err := xdwarf.DecodeLineUnit(&u, sec, off, size, aux)
-		var small xdwarf.AuxTooSmallError
-		if errors.As(err, &small) {
-			aux = make([]byte, small.Need)
-			continue
-		}
 		if err != nil {
 			return nil, fmt.Errorf("line unit at %d: %w", off, err)
 		}
@@ -104,6 +98,56 @@ func buildLineIndex(sec xdwarf.Sections, size int64) (*lineIndex, error) {
 	return idx, nil
 }
 
+// defaultAux starts the scratch buffer comfortably past any ordinary line
+// program header; the grow-and-retry below covers the rest.
+const defaultAux = 4096
+
+// loadLineIndex builds the line index, growing the decoder's buffers and
+// loading again until they are large enough.
+//
+// Retrying means starting over rather than resuming: a compressed .debug_line
+// is inflated as it is walked and cannot be rewound, so both a larger aux and a
+// zlib reader the binary turned out to need require a fresh load.
+func loadLineIndex(f *xelf.File, rr *elfutil.DWARFReaders) (*lineIndex, error) {
+	aux := make([]byte, defaultAux)
+	for {
+		// The lookback the streaming path needs is a function of aux, so the two
+		// grow together or the walk fails partway through.
+		rr.Stream = resize(rr.Stream, elfutil.StreamBufferFor(len(aux)))
+		var sec xdwarf.Sections
+		size, err := elfutil.LoadDWARF(&sec, rr, f)
+		if errors.Is(err, elfutil.ErrNoZlib) {
+			// The gc toolchain compresses DWARF by default, so this is the
+			// ordinary path for a binary that was not built with TinyGo. The
+			// inflater is only built once the binary proves it needs one.
+			zr := new(zlib.Reader)
+			if err := zr.Configure(zlib.DefaultConfig()); err != nil {
+				return nil, err
+			}
+			rr.Zlib = zr
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		idx, err := buildLineIndex(sec, size, aux)
+		var small xdwarf.AuxTooSmallError
+		if errors.As(err, &small) {
+			aux = make([]byte, small.Need)
+			continue
+		}
+		return idx, err
+	}
+}
+
+// resize returns b with length n, reusing its memory when it already has room.
+func resize(b []byte, n int) []byte {
+	if cap(b) < n {
+		return make([]byte, n)
+	}
+	return b[:n]
+}
+
 // visitOverlaps calls fn for each source range overlapping [start, end), with
 // the number of bytes of the overlap.
 func (idx *lineIndex) visitOverlaps(start, end uint64, fn func(r srcRange, n int64)) {
@@ -141,13 +185,8 @@ func profileSource(f *xelf.File, mem, byLine bool) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	var sec xdwarf.Sections
 	var readers elfutil.DWARFReaders
-	lineSize, err := elfutil.LoadDWARF(&sec, &readers, f)
-	if err != nil {
-		return nil, err
-	}
-	idx, err := buildLineIndex(sec, lineSize)
+	idx, err := loadLineIndex(f, &readers)
 	if err != nil {
 		return nil, err
 	}
