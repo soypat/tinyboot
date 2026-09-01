@@ -8,8 +8,6 @@ require (
 )
 
 require (
-	github.com/soypat/archive v0.0.0
+	github.com/soypat/archive v0.0.0-20260901132919-feccf583f5d8
 	github.com/soypat/lexorg v0.1.2
 )
-
-replace github.com/soypat/archive => /home/pato/src/tg/archive
