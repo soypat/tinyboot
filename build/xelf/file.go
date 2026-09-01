@@ -16,6 +16,11 @@ type File struct {
 	// Below are auxiliary buffers used during data marshalling.
 
 	buf [fileBufSize]byte
+	// strbuf is the fill buffer for reading string-table entries. It is separate
+	// from buf because a caller may pass buf itself as the destination to append
+	// a name into -- SectionByName does -- and a name spanning more than one
+	// read would otherwise have its own bytes overwritten by the next fill.
+	strbuf [fileBufSize]byte
 }
 
 // NumSections returns the number of sections in the ELF binary as specified by the ELF header.
@@ -161,7 +166,7 @@ func (f *File) Header() Header {
 
 // Prog returns the program at progIdx index.
 func (f *File) Prog(progIdx int) (FileProg, error) {
-	if progIdx >= len(f.sections) || progIdx < 0 {
+	if progIdx >= len(f.progs) || progIdx < 0 {
 		return FileProg{}, errors.New("OOB/negative prog index")
 	}
 	return FileProg{
@@ -225,16 +230,24 @@ func (fs FileSection) ptr() *section {
 	return &fs.f.sections[fs.sindex]
 }
 
+// Index returns the index of the FileSection within the file among sections.
+func (fs FileSection) Index() int { return fs.sindex }
+
 // SectionHeader returns the section's header.
 func (fs FileSection) SectionHeader() SectionHeader {
 	return fs.ptr().SectionHeader
 }
 
-// Size returns the size of the ELF section body after decompression in bytes.
+// Size returns the size of the ELF section body after decompression in bytes,
+// or -1 if a compressed section's header could not be read.
 func (fs FileSection) Size() int64 {
 	s := fs.ptr()
 	if s.Flags&SectionFlag(secFlagCompressed) != 0 {
-		return -1 // TODO:calculate uncompressed size.
+		ch, _, err := fs.Compression()
+		if err != nil {
+			return -1
+		}
+		return ch.Size
 	}
 	return int64(s.SizeOnFile)
 }
@@ -251,8 +264,8 @@ func (fs FileSection) Name() (string, error) {
 	return string(str), nil
 }
 
-// Open returns a new [io.ReadSeeker] reading the ELF section body.
-func (fs FileSection) Open() io.ReadSeeker {
+// Open returns a new [io.SectionReader] reading the ELF section body.
+func (fs FileSection) Open() *io.SectionReader {
 	s := fs.ptr()
 	if s.Type == SecTypeNobits {
 		return io.NewSectionReader(&nobitsSectionReader{}, 0, int64(s.SizeOnFile))
@@ -413,20 +426,27 @@ func (f *File) AppendTableStr(dst []byte, start uint32) ([]byte, error) {
 
 // appendStr extracts a null terminated string from an ELF string table starting at start and appends it to dst.
 func (fs FileSection) appendStr(dst []byte, start int64) ([]byte, error) {
+	n0 := len(dst)
+	size := fs.Size()
 	if start < 0 {
 		return dst, errors.New("bad section header name value")
-	} else if int64(start) >= fs.Size() {
+	} else if start >= size {
 		return dst, errors.New("start of string exceeds section size")
 	}
-	secData, err := fs.readAt(fs.f.buf[:], start)
-	if err != nil {
-		return dst, err
+	for off := start; off < size; {
+		secData, err := fs.readAt(fs.f.strbuf[:], off)
+		if err != nil {
+			return dst[:n0], err
+		} else if len(secData) == 0 {
+			break
+		}
+		if strEnd := bytes.IndexByte(secData, 0); strEnd >= 0 {
+			return append(dst, secData[:strEnd]...), nil
+		}
+		dst = append(dst, secData...)
+		off += int64(len(secData))
 	}
-	strEnd := bytes.IndexByte(secData, 0)
-	if strEnd < 0 {
-		return dst, errors.New("name too long or bad data")
-	}
-	return append(dst, secData[:strEnd]...), nil
+	return dst[:n0], errors.New("unterminated string in string table")
 }
 
 func readSRInto(buf []byte, sr *io.SectionReader, offset int64) ([]byte, error) {

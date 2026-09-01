@@ -1,4 +1,8 @@
+github.com/soypat/archive v0.0.0-20260901132919-feccf583f5d8 h1:erfTPGmNgcBk4LWDGyzFa8SgkJRv844mf9PtrnGbA0U=
+github.com/soypat/archive v0.0.0-20260901132919-feccf583f5d8/go.mod h1:bmojNigH+o11aZMzOkYeAjCoazvAlHydiULrm5wJy+Q=
 github.com/soypat/fat v0.2.1 h1:wYsxsqJBWvTXUvrB8QgcgPFaDnom/2S9XTktc7NQwbc=
 github.com/soypat/fat v0.2.1/go.mod h1:6cCZCfoOpl4IbaA4ohTrTYp1ejoUGEoiToDXpXDfAk0=
+github.com/soypat/lexorg v0.1.2 h1:WaJHXfL0r8QoGMbL31JppgDjgqv9rDu/cVQwEXTD0Dw=
+github.com/soypat/lexorg v0.1.2/go.mod h1:iK2sgPdrDdmLyjzPosyl5bPEaF7w/MI9kaDpqLVyxJk=
 github.com/soypat/lfs v0.2.2 h1:9YWxmKBDG+MwZnFFEZ5jKO8DKcNpxakSVEKsjkeNTsQ=
 github.com/soypat/lfs v0.2.2/go.mod h1:dJHBXm9acoZXuLRD0OISP40ey3w8wO089cqfB5ykcD0=

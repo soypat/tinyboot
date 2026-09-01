@@ -1,7 +1,6 @@
 package xelf
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -48,32 +47,22 @@ func ApplyRelocations(dst []byte, rels []byte, syms []Sym, hdr Header) (err erro
 	} else if len(syms) == 0 {
 		return errors.New("no symbols for relocation")
 	}
-	class := hdr.Class
-	machine := hdr.Machine
-	err = hdr.Data.Validate()
+	bo := hdr.ByteOrder()
+	var oob RelocError
+	fail, err := rangeRelocFields(rels, syms, hdr, func(f relocField) {
+		// dst is the whole section here, so a field that does not fit is out of
+		// bounds rather than merely out of view.
+		if !f.patch(dst, 0, bo) {
+			oob |= relocFailOOB
+		}
+	})
 	if err != nil {
 		return err
 	}
-	bo := hdr.ByteOrder()
-	switch class {
-	case Class32:
-		switch machine {
-		case MachineARM:
-			err = applyRelocationsARM(dst, rels, syms, bo)
-		default:
-			err = fmt.Errorf("relocation not implemented for tuple (Class32, %s)", machine.String())
-		}
-	case Class64:
-		switch machine {
-		case MachineX86_64:
-			err = applyRelocationsAMD64(dst, rels, syms, bo)
-		default:
-			err = fmt.Errorf("relocation not implemented for tuple (Class64, %s)", machine.String())
-		}
-	default:
-		err = errBadClass
+	if fail |= oob; fail != 0 {
+		return fail
 	}
-	return err
+	return nil
 }
 
 // canApplyRelocation reports whether we should try to apply a
@@ -87,98 +76,35 @@ func canApplyRelocation(sym Sym) bool {
 	return sec != SecIdxUndef && sec < SecIdxReserveLo
 }
 
-func applyRelocationsARM(dst []byte, rels []byte, syms []Sym, bo binary.ByteOrder) (err error) {
-	if len(rels)%8 != 0 {
-		return errors.New("length of relocation section not multiple of 8")
-	}
-	var fail RelocError
-	for len(rels) > 0 {
-		rel, n, err := DecodeRel(rels, Class32, bo)
+// RelocationsFor returns the relocation section targeting the section at index
+// target, reporting whether one was found.
+//
+// ELF links a relocation section to the section it modifies through sh_info.
+// Honoring that link matters: applying an unrelated section's relocations (say
+// .rela.dyn, which targets .got and .data) onto .debug_info silently corrupts
+// the target rather than failing.
+func (f *File) RelocationsFor(target int) (FileSection, bool) {
+	nsect := f.NumSections()
+	for i := 0; i < nsect; i++ {
+		s, err := f.Section(i)
 		if err != nil {
-			return err
+			return FileSection{}, false
 		}
-		rels = rels[n:]
-		symNo := rel.Info >> 8
-		t := RARM(rel.Info & 0xff)
-		if symNo == 0 {
-			continue
-		} else if symNo > uint64(len(syms)) {
-			fail |= relocFailOOBSymIdx
+		sh := s.SectionHeader()
+		if sh.Type != SecTypeRel && sh.Type != SecTypeRelA {
 			continue
 		}
-		sym := &syms[symNo-1]
-		switch t {
-		case RARMABS32:
-			if rel.Off+4 >= uint64(len(dst)) {
-				fail |= relocFailOOB
-				continue
-			}
-			val := bo.Uint32(dst[rel.Off : rel.Off+4])
-			val += uint32(sym.Value)
-			bo.PutUint32(dst[rel.Off:rel.Off+4], val)
-		default:
-			fail |= relocUnhandledRelType
+		if int(sh.Info) == target {
+			return s, true
 		}
 	}
-	if fail != 0 {
-		return fail
-	}
-	return nil
+	return FileSection{}, false
 }
 
-func applyRelocationsAMD64(dst []byte, relas []byte, syms []Sym, bo binary.ByteOrder) (err error) {
-	if len(relas)%8 != 0 {
-		return errors.New("length of relocation section not multiple of 8")
-	}
-	var fail RelocError
-	for len(relas) > 0 {
-		rela, n, err := DecodeRela(relas, Class64, bo)
-		if err != nil {
-			return err
-		}
-		relas = relas[n:]
-		symNo := rela.Info >> 32
-		t := RX86_64(rela.Info & 0xffff)
-		if symNo == 0 {
-			continue
-		} else if symNo > uint64(len(syms)) {
-			fail |= relocFailOOBSymIdx
-			continue
-		}
-		sym := &syms[symNo-1]
-		if !canApplyRelocation(*sym) {
-			fail |= relocFailUnableApply
-			continue
-		}
-
-		// There are relocations, so this must be a normal
-		// object file.  The code below handles only basic relocations
-		// of the form S + A (symbol plus addend).
-		switch t {
-		case Rx86_6464:
-			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
-				fail |= relocFailOOB
-				continue
-			}
-			val64 := sym.Value + uint64(rela.Addend)
-			bo.PutUint64(dst[rela.Off:rela.Off+8], val64)
-
-		case Rx86_6432:
-			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
-				fail |= relocFailOOB
-				continue
-			}
-			val32 := uint32(sym.Value) + uint32(rela.Addend)
-			bo.PutUint32(dst[rela.Off:rela.Off+4], val32)
-
-		default:
-			fail |= relocUnhandledRelType
-		}
-	}
-	if fail != 0 {
-		return fail
-	}
-	return nil
+// fitsAt reports whether a size-byte field starting at off lies entirely within b.
+// Phrased to avoid overflowing off+size, since off comes from an untrusted file.
+func fitsAt(b []byte, off, size uint64) bool {
+	return uint64(len(b)) >= size && off <= uint64(len(b))-size
 }
 
 // AppendTableSymbols appends the symbol table entities to the argument buffer and returns the result.

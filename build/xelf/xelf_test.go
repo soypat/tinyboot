@@ -48,33 +48,31 @@ func TestFile_Read_helloc(t *testing.T) {
 	f := testFile(t, fp, 36)
 	nsect := f.NumSections()
 
-	// Generate relocation data.
-	var allrel []byte
-	for i := 0; i < nsect; i++ {
-		s, _ := f.Section(i)
-		sh := s.SectionHeader()
-		if sh.Type != SecTypeRel && sh.Type != SecTypeRelA {
-			continue
-		}
-		allrel, _ = s.AppendData(allrel)
-	}
-	if len(allrel) == 0 {
-		t.Fatal("no relocation data")
-	}
 	syms, err := f.AppendTableSymbols(nil)
 	if err != nil {
 		t.Fatal("getting symbol table", err)
 	}
 	hdr := f.Header()
+	// Relocate each debug section with the relocations that target *it*, found
+	// through sh_info. Concatenating every rel/rela section in the file and
+	// applying the blob to every debug section would feed .rela.dyn (which
+	// targets .got and .data) into .debug_aranges.
 	for i := 0; i < nsect; i++ {
 		s, _ := f.Section(i)
 		sname, _ := s.Name()
-		suffix := dwarfSuffix(sname)
-		if suffix == "" {
+		if dwarfSuffix(sname) == "" {
 			continue
 		}
+		rels, ok := f.RelocationsFor(i)
+		if !ok {
+			continue // Linked executable: debug sections are already resolved.
+		}
+		relData, err := rels.AppendData(nil)
+		if err != nil {
+			t.Fatalf("reading relocations for %q: %s", sname, err)
+		}
 		data, _ := s.AppendData(nil)
-		err = ApplyRelocations(data, allrel, syms, hdr)
+		err = ApplyRelocations(data, relData, syms, hdr)
 		if err != nil {
 			t.Fatalf("failure to apply relocation to %q: %s", sname, err)
 		}
