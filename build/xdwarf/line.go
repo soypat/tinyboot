@@ -3,7 +3,6 @@ package xdwarf
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"io"
 	"path"
 	"slices"
@@ -724,38 +723,14 @@ func (u *LineUnit) skipForm(c *cursor, f Form) error {
 	return c.err
 }
 
-// ErrStopVisit ends a visit early without reporting an error.
-var ErrStopVisit = errors.New("stop visiting")
-
-// VisitRows runs the unit's line number program, calling fn for each row of the
-// line table. It allocates nothing: the opcode stream is read through the aux
-// tail the unit was decoded with, and rows are passed by value as the state
-// machine produces them.
-//
-// Returning [ErrStopVisit] from fn ends the walk and returns nil; any other
-// error ends the walk and is returned.
-func (u *LineUnit) VisitRows(fn func(r Row) error) error {
-	if u.sec.Line == nil {
-		return errNoLineSection
-	}
+// Rows is an [iter.Seq] iterator implementation oveer LineUnit rows.
+func (u *LineUnit) Rows(yield func(r Row) bool) {
 	var c streamCursor
 	c.config(u.sec.Line, u.win, u.progStart, u.progEnd, u.sec.byteOrder())
 
 	// reset returns the state machine to its documented initial state, which
 	// applies at the start of the unit and after every end_sequence.
 	var row Row
-	reset := func() {
-		row = Row{File: 1, Line: 1, IsStmt: u.defStmt}
-	}
-	reset()
-
-	// advance moves the address by opAdvance operations, honoring VLIW
-	// op_index packing when the producer declares more than one op per
-	// instruction.
-	advance := func(opAdvance uint64) {
-		row.Address += uint64(u.minInst) * opAdvance
-	}
-
 	for c.err == nil && c.pos() < u.progEnd {
 		opcode := c.u8()
 		if c.err != nil {
@@ -765,10 +740,10 @@ func (u *LineUnit) VisitRows(fn func(r Row) error) error {
 		case opcode >= u.opBase:
 			// Special opcode: encodes an address and line delta together.
 			adj := uint64(opcode - u.opBase)
-			advance(adj / uint64(u.lineRnge))
+			row.Address = u.advance(adj / uint64(u.lineRnge))
 			row.Line = uint32(int64(row.Line) + int64(u.lineBase) + int64(adj%uint64(u.lineRnge)))
-			if err := fn(row); err != nil {
-				return stopErr(err)
+			if !yield(row) {
+				return
 			}
 			row.EndSequence = false
 
@@ -790,10 +765,11 @@ func (u *LineUnit) VisitRows(fn func(r Row) error) error {
 			switch sub {
 			case LineExtEndSequence:
 				row.EndSequence = true
-				if err := fn(row); err != nil {
-					return stopErr(err)
+				if !yield(row) {
+					return
 				}
-				reset()
+				row = u.resetRow()
+
 			case LineExtSetAddress:
 				switch end - c.pos() {
 				case 8:
@@ -814,12 +790,12 @@ func (u *LineUnit) VisitRows(fn func(r Row) error) error {
 		default:
 			switch LineOp(opcode) {
 			case LineOpCopy:
-				if err := fn(row); err != nil {
-					return stopErr(err)
+				if !yield(row) {
+					return
 				}
 				row.EndSequence = false
 			case LineOpAdvancePC:
-				advance(c.uleb())
+				row.Address = u.advance(c.uleb())
 			case LineOpAdvanceLine:
 				row.Line = uint32(int64(row.Line) + c.sleb())
 			case LineOpSetFile:
@@ -831,7 +807,7 @@ func (u *LineUnit) VisitRows(fn func(r Row) error) error {
 			case LineOpSetBasicBlock:
 				// No state this package tracks.
 			case LineOpConstAddPC:
-				advance(uint64(255-u.opBase) / uint64(u.lineRnge))
+				row.Address = u.advance(uint64(255-u.opBase) / uint64(u.lineRnge))
 			case LineOpFixedAdvancePC:
 				// Deliberately not scaled by minimum_instruction_length.
 				row.Address += uint64(c.u16())
@@ -852,14 +828,17 @@ func (u *LineUnit) VisitRows(fn func(r Row) error) error {
 			}
 		}
 	}
-	return c.err
 }
 
-func stopErr(err error) error {
-	if errors.Is(err, ErrStopVisit) {
-		return nil
-	}
-	return err
+func (u *LineUnit) resetRow() Row {
+	return Row{File: 1, Line: 1, IsStmt: u.defStmt}
+}
+
+// advance moves the address by opAdvance operations, honoring VLIW
+// op_index packing when the producer declares more than one op per
+// instruction.
+func (u *LineUnit) advance(opAdvance uint64) uint64 {
+	return uint64(u.minInst) * opAdvance
 }
 
 // CleanPath normalizes a source path for reporting. Compilers emit a mix of

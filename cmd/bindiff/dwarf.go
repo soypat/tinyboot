@@ -69,16 +69,16 @@ func buildLineIndex(sec xdwarf.Sections, size int64, aux []byte) (*lineIndex, er
 			}
 			havePending = false
 		}
-		err = u.VisitRows(func(r xdwarf.Row) error {
+		for r := range u.Rows {
 			flush(r.Address)
 			if r.EndSequence {
-				return nil
+				break
 			}
 			nameBuf, err = u.AppendFileName(nameBuf[:0], r.File)
 			if err != nil {
 				// A row naming a file outside the table is not worth failing
 				// the whole binary over; it lands in the remainder instead.
-				return nil
+				break
 			}
 			name := xdwarf.CleanPath(string(nameBuf))
 			canonical, ok := interned[name]
@@ -88,10 +88,6 @@ func buildLineIndex(sec xdwarf.Sections, size int64, aux []byte) (*lineIndex, er
 			}
 			pending = srcRange{start: r.Address, file: canonical, line: r.Line}
 			havePending = true
-			return nil
-		})
-		if err != nil {
-			return nil, fmt.Errorf("line unit at %d: %w", off, err)
 		}
 		flush(0) // A sequence that never ended contributes nothing.
 		off = next
