@@ -156,9 +156,16 @@ type RelocReaderAt struct {
 }
 
 // Reset binds rr to the body of section sec within f, decoding the relocations
-// that target it. It reports whether any relocation section does; when none
-// does, rr is left bound to sec's bytes unchanged, so a caller can use it either
-// way without branching.
+// that target it. It reports whether any were; when none were, rr is left bound
+// to sec's bytes unchanged, so a caller can use it either way without branching.
+//
+// Only a relocatable object is relocated. A linked file's sections already hold
+// final addresses, and applying its relocations again would add each symbol's
+// value a second time -- which stays invisible while the target section sits at
+// address zero and corrupts every address once it does not. Such a file may
+// still carry relocation sections: TinyGo's executables keep .rel.debug_*, and
+// the values there describe a link that already happened. debug/elf declines
+// them for the same reason.
 //
 // Relocation types this build does not implement leave those particular fields
 // alone, which [RelocReaderAt.Err] reports; the rest of the section is still
@@ -167,6 +174,9 @@ func (rr *RelocReaderAt) Reset(f *File, sec FileSection) (relocated bool, err er
 	rr.r, rr.fields, rr.fail = sec.Open(), rr.fields[:0], 0
 	hdr := f.Header()
 	rr.bo = hdr.ByteOrder()
+	if hdr.Type != TypeRelocatable {
+		return false, nil
+	}
 	rels, ok := f.RelocationsFor(sec.Index())
 	if !ok {
 		return false, nil

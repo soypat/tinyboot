@@ -203,10 +203,20 @@ func profilePackages(f *xelf.File, mem bool) ([]Entry, error) {
 	return entries, nil
 }
 
-// cPackage collects symbols that carry no package qualifier.
-const cPackage = "[c]"
+// Buckets for symbols that name no package of their own.
+const (
+	// cPackage collects symbols that carry no package qualifier.
+	cPackage = "[c]"
+	// typePackage collects type descriptors: reflect metadata a compiler names
+	// by spelling the type out, which belongs to no package at all.
+	typePackage = "[type]"
+)
 
-// packageOf extracts the package path from a TinyGo symbol name.
+// typePunct are the characters that begin a spelled-out type in a symbol name
+// and can appear in no package path or identifier.
+const typePunct = ":{}[](),; "
+
+// packageOf extracts the package path from a symbol name.
 //
 // A package path may itself contain dots ("github.com/soypat/x.Func"), so the
 // boundary is the first dot after the final slash rather than the last dot.
@@ -215,6 +225,15 @@ func packageOf(sym string) string {
 		return Unattributed
 	}
 	s := sym
+	// The gc linker names its own generated symbols with a colon and no
+	// package: go:func.*, go:string.*, go:itab.*, type:*. Report them under
+	// that prefix rather than letting what follows drive the split.
+	if head, rest, ok := strings.Cut(s, ":"); ok && (head == "go" || head == "type") {
+		if d := strings.Index(rest, "."); d >= 0 {
+			return head + ":" + rest[:d]
+		}
+		return head
+	}
 	// Method symbols carry a receiver: "(*internal/task.Queue).Pop".
 	if strings.HasPrefix(s, "(") {
 		if end := strings.Index(s, ")"); end > 1 {
@@ -228,10 +247,27 @@ func packageOf(sym string) string {
 	if i := strings.Index(s, "$"); i >= 0 {
 		s, generated = s[:i], true
 	}
+	// Cut off any spelled-out type. TinyGo writes whole types into a symbol
+	// name -- "reflect/types.type:named:internal/reflectlite.Kind",
+	// "slices.symMergeCmpFunc[named:internal/fmtsort.KeyValue]" -- and those
+	// spellings carry their own slashes and dots. Searching the whole name for
+	// the package boundary finds the last slash inside the type instead, which
+	// is how a few hundred functions turned into a few hundred packages.
+	typed := false
+	if i := strings.IndexAny(s, typePunct); i >= 0 {
+		s, typed = s[:i], true
+	}
 
 	slash := strings.LastIndex(s, "/")
 	dot := strings.Index(s[slash+1:], ".")
 	if dot < 0 {
+		// A name that spelled a type belongs to no package, whether or not it is
+		// also compiler-generated: TinyGo's interface wrappers are both, as in
+		// "interface:{Error:func:{}{basic:string}}.Error$invoke", and what is
+		// left of one after the type is cut off ("interface") names nothing.
+		if typed {
+			return typePackage
+		}
 		// No qualifier at all. A generated symbol is still package-named.
 		if generated && s != "" {
 			return s
@@ -241,7 +277,7 @@ func packageOf(sym string) string {
 	pkg, rest := s[:slash+1+dot], s[slash+1+dot+1:]
 	// GCC gives file-local C symbols a numeric discriminator ("object.0",
 	// "crlf_str.1"). That dot separates a suffix, not a package.
-	if !generated && isAllDigits(rest) {
+	if !generated && !typed && isAllDigits(rest) {
 		return cPackage
 	}
 	if pkg == "" {

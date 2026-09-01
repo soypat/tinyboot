@@ -153,7 +153,12 @@ func (d *dwarfSection) open(src *xelf.File, fsec xelf.FileSection, rr *DWARFRead
 	// -gz: gcc and clang compress .debug_* in .o output, and the relocations
 	// against them stay in .rela.debug_*, since the gABI's only exclusivity rule
 	// for SHF_COMPRESSED is against SHF_ALLOC.
-	_, relocated := src.RelocationsFor(fsec.Index())
+	// Only a relocatable object is relocated; a linked file's debug sections
+	// already hold final addresses. See [xelf.RelocReaderAt.Reset].
+	relocated := false
+	if src.Header().Type == xelf.TypeRelocatable {
+		_, relocated = src.RelocationsFor(fsec.Index())
+	}
 	if seekable || relocated {
 		r, size, err := d.inflateWhole(rr.Zlib, ch.Size)
 		if err != nil {

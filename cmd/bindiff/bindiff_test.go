@@ -481,3 +481,89 @@ func profileFixture(t *testing.T, name string, flags Flags) ([]Entry, int64) {
 	}
 	return entries, info.Size()
 }
+
+// TestPackageOfSpelledTypes covers symbol names carrying a spelled-out type.
+// TinyGo writes whole types into a name, and those spellings contain their own
+// slashes and dots -- so searching the whole name for the package boundary
+// lands inside the type and turns one package into many.
+func TestPackageOfSpelledTypes(t *testing.T) {
+	for _, tc := range []struct{ sym, want string }{
+		// The type expression must not supply the package boundary.
+		{"reflect/types.type:named:internal/reflectlite.Kind", "reflect/types"},
+		{"slices.symMergeCmpFunc[named:internal/fmtsort.KeyValue]", "slices"},
+		{"unique.Make[named:net/netip.addrDetail]", "unique"},
+		{"reflect/types.type:struct:{Next:pointer:named:internal/task.Task}", "reflect/types"},
+		{"internal/sync..dict.HashTrieMap[*internal/abi.Type,interface]", "internal/sync"},
+		// A type with no package of its own is not a C symbol. TinyGo's
+		// interface wrappers are compiler-generated as well as type-spelled,
+		// and the '$' must not make "interface" look like a package name.
+		{"interface:{Error:func:{}{basic:string}}", typePackage},
+		{"interface:{Error:func:{}{basic:string}}.Error$invoke", typePackage},
+		{"interface:{String:func:{}{basic:string}}.$typeassert", typePackage},
+		// gc's own linker symbols keep their prefix rather than splitting on
+		// the colon that follows it.
+		{"go:func.*", "go:func"},
+		{"go:string.*", "go:string"},
+		{"go:itab.*reflect.rtype,reflect.Type", "go:itab"},
+		{"type:*", "type"},
+		// A generic method still reports the receiver's package.
+		{"(*github.com/soypat/x/y.Foo[github.com/a/b.Bar]).Method", "github.com/soypat/x/y"},
+	} {
+		if got := packageOf(tc.sym); got != tc.want {
+			t.Errorf("packageOf(%q)=%q want %q", tc.sym, got, tc.want)
+		}
+	}
+}
+
+// TestVisitOverlapsUnsortedEnds covers a lookup whose answer lies behind a range
+// that starts early and runs long.
+//
+// Ranges are ordered by start, which says nothing about their ends: a line
+// program may emit a long range before short ones, and sequences interleave. A
+// binary search testing ends directly is then searching unsorted data and can
+// land past the very range it was looking for, silently attributing nothing.
+func TestVisitOverlapsUnsortedEnds(t *testing.T) {
+	idx := &lineIndex{ranges: []srcRange{
+		{start: 0, end: 1000, file: "long.go"}, // Ends far past the ones after it.
+		{start: 10, end: 20, file: "a.go"},
+		{start: 30, end: 40, file: "b.go"},
+		{start: 900, end: 910, file: "c.go"},
+	}}
+	idx.buildMaxEnd()
+
+	// [500,520) falls inside long.go alone. The ranges bracketing it in the
+	// array end well before it, which is what misleads a search over ends.
+	var got []string
+	var total int64
+	idx.visitOverlaps(500, 520, func(r srcRange, n int64) {
+		got = append(got, r.file)
+		total += n
+	})
+	if len(got) != 1 || got[0] != "long.go" {
+		t.Fatalf("visitOverlaps(500,520) matched %v, want [long.go]", got)
+	}
+	if total != 20 {
+		t.Errorf("attributed %d bytes, want 20", total)
+	}
+
+	// A span covering several ranges must report each one's share exactly once.
+	byFile := map[string]int64{}
+	idx.visitOverlaps(0, 1000, func(r srcRange, n int64) { byFile[r.file] += n })
+	for _, want := range []struct {
+		file string
+		n    int64
+	}{{"long.go", 1000}, {"a.go", 10}, {"b.go", 10}, {"c.go", 10}} {
+		if byFile[want.file] != want.n {
+			t.Errorf("%s got %d bytes, want %d", want.file, byFile[want.file], want.n)
+		}
+	}
+
+	// A span before every range and one after them all must match nothing.
+	for _, span := range [][2]uint64{{2000, 2100}, {1000, 1001}} {
+		var n int
+		idx.visitOverlaps(span[0], span[1], func(srcRange, int64) { n++ })
+		if n != 0 && span[0] >= 1000 {
+			t.Errorf("span %v matched %d ranges past the end of the index", span, n)
+		}
+	}
+}

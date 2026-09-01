@@ -22,6 +22,13 @@ type srcRange struct {
 // lineIndex answers "which source position does this address belong to".
 type lineIndex struct {
 	ranges []srcRange // Sorted by start, non-overlapping within a sequence.
+	// maxEnd[i] is the largest end among ranges[:i+1]. Sorting by start leaves
+	// the ends in no order at all -- a sequence may emit a long range after a
+	// short one, and sequences interleave -- so a search for "the first range
+	// that reaches this address" cannot test ends directly. The running maximum
+	// can be tested: it never decreases, and once it passes an address every
+	// range that could reach it lies at or after that point.
+	maxEnd []uint64
 }
 
 // buildLineIndex walks every line program in the binary and converts the line
@@ -95,7 +102,21 @@ func buildLineIndex(sec xdwarf.Sections, size int64, aux []byte) (*lineIndex, er
 		}
 		return idx.ranges[i].end < idx.ranges[j].end
 	})
+	idx.buildMaxEnd()
 	return idx, nil
+}
+
+// buildMaxEnd fills the running maximum the overlap search binary-searches on.
+// It must run after ranges is in its final order.
+func (idx *lineIndex) buildMaxEnd() {
+	idx.maxEnd = make([]uint64, len(idx.ranges))
+	var m uint64
+	for i, r := range idx.ranges {
+		if r.end > m {
+			m = r.end
+		}
+		idx.maxEnd[i] = m
+	}
 }
 
 // defaultAux starts the scratch buffer comfortably past any ordinary line
@@ -154,9 +175,12 @@ func (idx *lineIndex) visitOverlaps(start, end uint64, fn func(r srcRange, n int
 	if start >= end || len(idx.ranges) == 0 {
 		return
 	}
-	// First range that could overlap: the last one starting at or before start.
+	// First range that could reach start. Testing ends directly would be a
+	// search over unsorted data: ranges are ordered by start, and a predicate on
+	// end flips back and forth, so sort.Search is free to land past a range that
+	// does overlap. The running maximum is what makes the search well defined.
 	i := sort.Search(len(idx.ranges), func(i int) bool {
-		return idx.ranges[i].end > start
+		return idx.maxEnd[i] > start
 	})
 	for ; i < len(idx.ranges) && idx.ranges[i].start < end; i++ {
 		r := idx.ranges[i]
