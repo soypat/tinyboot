@@ -275,6 +275,39 @@ func TestRowsStop(t *testing.T) {
 	if n != 3 {
 		t.Errorf("visited %d rows after stopping at 3", n)
 	}
+	// Stopping is the caller's own doing. Reporting it as an error would make
+	// every early exit look like a malformed unit.
+	if err := u.Err(); err != nil {
+		t.Errorf("stopping the walk reported an error: %s", err)
+	}
+}
+
+// TestRowsErr pins the rest of the Err contract: a walk that reaches the end of
+// the opcode program reports nothing, and each walk describes only itself.
+func TestRowsErr(t *testing.T) {
+	sec, size := loadSections(t, "../../testdata/helloc.elf")
+	var u xdwarf.LineUnit
+	if _, err := xdwarf.DecodeLineUnit(&u, sec, 0, size, make([]byte, defaultAux)); err != nil {
+		t.Fatal(err)
+	}
+	rows := 0
+	for range u.Rows {
+		rows++
+	}
+	if rows == 0 {
+		t.Fatal("the unit yielded no rows")
+	}
+	if err := u.Err(); err != nil {
+		t.Fatalf("a complete walk reported an error: %s", err)
+	}
+	// A second walk over the same unit must start from a clean slate rather
+	// than inheriting the first walk's verdict.
+	for range u.Rows {
+		break
+	}
+	if err := u.Err(); err != nil {
+		t.Errorf("a second walk inherited an error: %s", err)
+	}
 }
 
 func TestDecodeLineUnitRejectsBadInput(t *testing.T) {

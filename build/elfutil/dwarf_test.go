@@ -181,10 +181,9 @@ func TestStreamBufferTooSmall(t *testing.T) {
 		var next int64
 		next, err = xdwarf.DecodeLineUnit(&u, sec, off, size, auxBuf)
 		if err == nil {
-			// LineUnit.Rows reports no error of its own, so a rewind that
-			// happens mid-program is only visible on the next unit's decode.
 			for range u.Rows {
 			}
+			err = u.Err()
 		}
 		if err != nil {
 			break
