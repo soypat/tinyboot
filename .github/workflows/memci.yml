@@ -18,6 +18,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.24"
+      - uses: acifani/setup-tinygo@v2
+        with:
+          tinygo-version: "0.42.0"
 
       - uses: soypat/memci@main
         with:
@@ -25,3 +28,5 @@ jobs:
           # bindiff lives in this repo, so measure with the copy under test
           # rather than installing a published one.
           bindiff: go run ./cmd/bindiff
+          tinygo: tinygo
+

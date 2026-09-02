@@ -131,8 +131,7 @@ func TestStreamedLineTableMatchesResident(t *testing.T) {
 	sec := xdwarf.Sections{Str: bytes.NewReader(str), LineStr: bytes.NewReader(lineStr)}
 
 	// The fixture's largest unit header wants 1867 bytes of aux, so 2048 is
-	// about as tight as this walk goes -- and tight is the point, since a small
-	// aux means a refill across nearly every read.
+	// about as tight as this walk goes.
 	for _, aux := range []int{2048, 4096, 16384} {
 		t.Run("aux="+itoa(aux), func(t *testing.T) {
 			sec.Line = bytes.NewReader(raw)
