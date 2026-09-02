@@ -102,9 +102,12 @@ type LineUnit struct {
 
 	sec Sections
 	hdr []byte // The unit header, at the front of aux. Inline strRefs index it.
-	win []byte // The tail of aux, the fill buffer VisitRows streams through.
+	win []byte // The tail of aux, the fill buffer Rows streams through.
 	// The opcode stream, as absolute offsets within .debug_line.
 	progStart, progEnd int64
+	// err holds why the last [LineUnit.Rows] walk stopped early. An iterator
+	// cannot return one, so it is kept here for [LineUnit.Err].
+	err error
 }
 
 // Row is one row of the line table matrix: the state of the line program at a
@@ -316,7 +319,7 @@ func (u *LineUnit) appendStr(dst []byte, r strRef) ([]byte, error) {
 // appendCStr appends the NUL-terminated string at off to dst, reading straight
 // onto dst's own spare capacity so it needs no scratch of its own. That matters
 // because the aux tail, the obvious place for scratch, is simultaneously the
-// window a [LineUnit.VisitRows] walk is streaming the opcode program through.
+// window a [LineUnit.Rows] walk is streaming the opcode program through.
 func appendCStr(dst []byte, r io.ReaderAt, off int64) ([]byte, error) {
 	if r == nil {
 		return dst, errNoStrSection
@@ -348,7 +351,7 @@ func appendCStr(dst []byte, r io.ReaderAt, off int64) ([]byte, error) {
 // aux is scratch owned by the caller and borrowed by dst until the next decode
 // into the same buffer. The unit's header is copied to its front, where dst's
 // directory and file tables point, and its tail becomes the fill buffer
-// [LineUnit.VisitRows] streams the opcode program through. An aux too small to
+// [LineUnit.Rows] streams the opcode program through. An aux too small to
 // hold both reports how large it needs to be. Passing the same dst and aux back
 // on the next call makes decoding allocation-free.
 func DecodeLineUnit(dst *LineUnit, sec Sections, off, size int64, aux []byte) (next int64, err error) {
@@ -723,8 +726,19 @@ func (u *LineUnit) skipForm(c *cursor, f Form) error {
 	return c.err
 }
 
-// Rows is an [iter.Seq] iterator implementation oveer LineUnit rows.
+// Err reports why the last [LineUnit.Rows] walk stopped, or nil if it ran to
+// the end of the opcode program. A malformed unit, or a lookback window too
+// small for the decoder to step back through, ends a walk early; because an
+// [iter.Seq] cannot return an error, a caller that needs to tell a truncated
+// walk from a complete one has to ask here.
+//
+// [LineUnit.Rows] clears it, so Err describes the most recent walk only.
+func (u *LineUnit) Err() error { return u.err }
+
+// Rows is an [iter.Seq] iterator over the unit's line table rows. A walk that
+// ends early leaves its reason in [LineUnit.Err].
 func (u *LineUnit) Rows(yield func(r Row) bool) {
+	u.err = nil
 	var c streamCursor
 	c.config(u.sec.Line, u.win, u.progStart, u.progEnd, u.sec.byteOrder())
 
@@ -828,6 +842,9 @@ func (u *LineUnit) Rows(yield func(r Row) bool) {
 			}
 		}
 	}
+	// Only reached by running the program out; every early return above is a
+	// caller stopping the walk, which leaves u.err nil as cleared on entry.
+	u.err = c.err
 }
 
 func (u *LineUnit) resetRow() Row {
