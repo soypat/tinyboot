@@ -31,4 +31,3 @@ jobs:
           # rather than installing a published one.
           bindiff: go run ./cmd/bindiff
           tinygo: tinygo
-
