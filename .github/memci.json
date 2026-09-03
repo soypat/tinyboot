@@ -1,0 +1,12 @@
+[
+  {
+    "name": "bindiff",
+    "build": "go build -trimpath -buildvcs=false -o bindiff.elf ./cmd/bindiff",
+    "elf": "bindiff.elf"
+  },
+  {
+    "name": "picobin",
+    "build": "go build -trimpath -buildvcs=false -o picobin.elf ./cmd/picobin",
+    "elf": "picobin.elf"
+  }
+]
