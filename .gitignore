@@ -43,6 +43,8 @@ local
 *.tsv
 *.dat
 *.json
+# memci's build list is configuration, not data.
+!.github/memci.json
 *.xlsx
 *.xls
 *.zip

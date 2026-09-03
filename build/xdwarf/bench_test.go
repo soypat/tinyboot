@@ -28,10 +28,10 @@ func BenchmarkLineRowsXdwarf(b *testing.B) {
 	// once the tables have grown to their high-water mark.
 	var u xdwarf.LineUnit
 	aux := make([]byte, benchAux)
-	var nameBuf []byte
+	nameBuf := make([]byte, 0, benchAux)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		var rows int
 		for off := int64(0); off < size; {
 			next, err := xdwarf.DecodeLineUnit(&u, sec, off, size, aux)
@@ -68,7 +68,7 @@ func BenchmarkLineRowsStdlib(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		d, err := ef.DWARF()
 		if err != nil {
 			b.Fatal(err)
