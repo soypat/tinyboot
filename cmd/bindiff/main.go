@@ -1,5 +1,5 @@
-// Command bindiff characterizes where the bytes of an ELF binary go, and what
-// changed between two builds of it.
+// Command bindiff characterizes where the bytes of an ELF binary or a
+// WebAssembly module go, and what changed between two builds of it.
 //
 // It reports at several granularities, from whole segments down to source
 // lines, and every granularity reconciles: the rows of a report sum to the size
@@ -10,6 +10,7 @@
 //	bindiff -kind=package profile firmware.elf
 //	bindiff -json diff old.elf new.elf
 //	bindiff -threshold=1024 diff old.elf new.elf   # exits non-zero on growth
+//	bindiff -kind=line profile app.wasm
 package main
 
 import (
@@ -105,6 +106,9 @@ func profileFile(path string, flags Flags) ([]Entry, error) {
 }
 
 func profileReader(r io.ReaderAt, size int64, flags Flags) ([]Entry, error) {
+	if isWasm(r) {
+		return profileWasm(r, size, flags)
+	}
 	var f xelf.File
 	if err := f.Read(r); err != nil {
 		return nil, err
