@@ -91,6 +91,10 @@ func TestPackageOf(t *testing.T) {
 		{"SystemInit", cPackage},
 		// The remainder bucket passes through so rollups still reconcile.
 		{Unattributed, Unattributed},
+		// Placeholders for unnamed WebAssembly items roll up by kind; their
+		// bracket must not read as the start of a spelled-out type.
+		{"[data 12]", "[data]"},
+		{"[func 7]", "[func]"},
 	} {
 		if got := packageOf(tc.sym); got != tc.want {
 			t.Errorf("packageOf(%q)=%q want %q", tc.sym, got, tc.want)

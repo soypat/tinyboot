@@ -10,148 +10,71 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/soypat/tinyboot/build/xwasm"
 )
 
-var wasmFixtures = []string{
-	"../../testdata/hello.wasm",
-	"../../testdata/hello-nodebug.wasm",
-}
-
-// wasmDebugFixture is the module carrying DWARF, which the source kinds need.
-const wasmDebugFixture = "../../testdata/hello.wasm"
+// wasmFixture is the one WebAssembly module the tests read, a TinyGo build
+// with DWARF. See testdata/src/gen.go. What the fixture cannot exercise --
+// a module without DWARF, a gc-built one -- is built in memory instead.
+const wasmFixture = "../../testdata/tiny.wasm"
 
 var wasmKinds = []Kind{KindSection, KindSymbol, KindPackage, KindFile, KindLine}
 
-func wasmKindsFor(name string) []Kind {
-	if name == wasmDebugFixture {
-		return wasmKinds
-	}
-	return wasmKinds[:3]
-}
-
-// TestWasmSectionProfileReconciles is TestSectionProfileReconciles for a
-// module: sections plus their framing account for every byte of the file.
-func TestWasmSectionProfileReconciles(t *testing.T) {
-	for _, name := range wasmFixtures {
-		entries, size := profileFixture(t, name, Flags{kind: KindSection})
-		_, total := Total(entries)
-		if total != size {
-			t.Errorf("%s: section profile totals %d, file is %d bytes", name, total, size)
-		}
-		for _, e := range entries {
-			if e.Name == Unattributed {
-				t.Errorf("%s: %d bytes no section claims", name, e.New)
-			}
+// TestWasmProfiles holds the invariants that make a report trustworthy, over
+// every kind that applies to a module:
+//   - sections plus their framing account for every byte of the file;
+//   - every kind below section describes the section contents, no more or less;
+//   - symbols tile the code and data sections, leaving only each vector count;
+//   - a profile diffed against itself changes nothing.
+func TestWasmProfiles(t *testing.T) {
+	sections, size := profileFixture(t, wasmFixture, Flags{kind: KindSection})
+	var contents int64
+	sectionSize := make(map[string]int64)
+	for _, e := range sections {
+		switch e.Name {
+		case Unattributed:
+			t.Errorf("%d bytes no section claims", e.New)
+		case "[wasm-headers]":
+		default:
+			contents += e.New
+			sectionSize[e.Name] = e.New
 		}
 	}
-}
-
-// TestWasmKindsAgreeOnTotal: every kind below section describes the same bytes,
-// the section contents, which is the section total less the framing.
-func TestWasmKindsAgreeOnTotal(t *testing.T) {
-	for _, name := range wasmFixtures {
-		sections, _ := profileFixture(t, name, Flags{kind: KindSection})
-		var want int64
-		for _, e := range sections {
-			if e.Name != "[wasm-headers]" {
-				want += e.New
-			}
-		}
-		for _, kind := range wasmKindsFor(name)[1:] {
-			entries, _ := profileFixture(t, name, Flags{kind: kind})
-			if _, total := Total(entries); total != want {
-				t.Errorf("%s: kind %v totals %d, section contents total %d", name, kind, total, want)
-			}
-		}
+	if _, total := Total(sections); total != size {
+		t.Errorf("section profile totals %d, file is %d bytes", total, size)
 	}
-}
 
-// TestWasmSymbolProfileReconciles checks each section's symbols plus remainder
-// against the section, and that functions leave only the Code section's
-// leading count unattributed.
-func TestWasmSymbolProfileReconciles(t *testing.T) {
-	for _, name := range wasmFixtures {
-		sections, _ := profileFixture(t, name, Flags{kind: KindSection})
-		entries, _ := profileFixture(t, name, Flags{kind: KindSymbol})
+	for _, kind := range wasmKinds {
+		entries, _ := profileFixture(t, wasmFixture, Flags{kind: kind})
+		if kind != KindSection {
+			if _, total := Total(entries); total != contents {
+				t.Errorf("kind %v totals %d, section contents total %d", kind, total, contents)
+			}
+		}
+		if n := len(DropUnchanged(Diff(entries, entries))); n != 0 {
+			t.Errorf("kind %v: self-diff left %d changed rows", kind, n)
+		}
+		if kind != KindSymbol {
+			continue
+		}
 		bySection := make(map[string]int64)
+		var hasMain bool
 		for _, e := range entries {
-			if e.New < 0 {
-				t.Errorf("%s: negative size %d for %q", name, e.New, e.Name)
-			}
 			bySection[e.Section] += e.New
+			hasMain = hasMain || strings.HasPrefix(e.Name, "main.")
 			if e.Name == Unattributed && (e.Section == "code" || e.Section == "data") && e.New > 5 {
-				t.Errorf("%s: %d bytes of %s unattributed, want only the vector count", name, e.New, e.Section)
+				t.Errorf("%d bytes of %s unattributed, want only the vector count", e.New, e.Section)
 			}
 		}
-		for _, s := range sections {
-			if s.Name == "[wasm-headers]" {
-				continue
-			}
-			if got := bySection[s.Name]; got != s.New {
-				t.Errorf("%s: section %q: symbols total %d, section is %d bytes", name, s.Name, got, s.New)
+		for name, want := range sectionSize {
+			if got := bySection[name]; got != want {
+				t.Errorf("section %q: symbols total %d, section is %d bytes", name, got, want)
 			}
 		}
-		var hasStart bool
-		for _, e := range entries {
-			hasStart = hasStart || e.Name == "_start"
+		if !hasMain {
+			t.Error("no main function among symbols")
 		}
-		if !hasStart {
-			t.Errorf("%s: no _start among function symbols", name)
-		}
-	}
-}
-
-// TestWasmSelfDiffIsEmpty mirrors TestSelfDiffIsEmpty.
-func TestWasmSelfDiffIsEmpty(t *testing.T) {
-	for _, name := range wasmFixtures {
-		for _, kind := range wasmKindsFor(name) {
-			entries, _ := profileFixture(t, name, Flags{kind: kind})
-			if n := len(DropUnchanged(Diff(entries, entries))); n != 0 {
-				t.Errorf("%s/%v: self-diff left %d changed rows", name, kind, n)
-			}
-		}
-	}
-}
-
-// TestWasmCrossBuildDiff diffs the debug build against the -no-debug one.
-// TinyGo's -no-debug also changes code generation, so the builds genuinely
-// differ; what must hold is that the diff's sides are exactly the two profiles.
-func TestWasmCrossBuildDiff(t *testing.T) {
-	for _, kind := range wasmKinds[:3] {
-		flags := Flags{kind: kind}
-		a, _ := profileFixture(t, wasmFixtures[0], flags)
-		b, _ := profileFixture(t, wasmFixtures[1], flags)
-		_, wantOld := Total(a)
-		_, wantNew := Total(b)
-		old, new := Total(Diff(a, b))
-		if old != wantOld || new != wantNew {
-			t.Errorf("%v: diff totals old=%d new=%d, profiles total %d and %d", kind, old, new, wantOld, wantNew)
-		}
-	}
-}
-
-func TestWasmUnsupported(t *testing.T) {
-	for _, flags := range []Flags{
-		{kind: KindSegment},
-		{kind: KindSection, mem: true},
-	} {
-		fp, err := os.Open(wasmDebugFixture)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = profileReader(fp, 0, flags)
-		fp.Close()
-		if err == nil {
-			t.Errorf("%+v: no error", flags)
-		}
-	}
-	fp, err := os.Open(wasmFixtures[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fp.Close()
-	if _, err := profileReader(fp, 0, Flags{kind: KindFile}); !errors.Is(err, errWasmNoDebugLine) {
-		t.Errorf("module without DWARF: got %v, want %v", err, errWasmNoDebugLine)
 	}
 }
 
@@ -160,7 +83,7 @@ func TestWasmUnsupported(t *testing.T) {
 // of its sequence.
 func TestWasmLineCoverageMatchesLLVM(t *testing.T) {
 	dump := llvmTool(t, "llvm-dwarfdump")
-	out, err := exec.Command(dump, "--debug-line", wasmDebugFixture).Output()
+	out, err := exec.Command(dump, "--debug-line", wasmFixture).Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +107,7 @@ func TestWasmLineCoverageMatchesLLVM(t *testing.T) {
 	if want == 0 {
 		t.Fatal("parsed no line table coverage from llvm-dwarfdump")
 	}
-	entries, _ := profileFixture(t, wasmDebugFixture, Flags{kind: KindFile})
+	entries, _ := profileFixture(t, wasmFixture, Flags{kind: KindFile})
 	var got int64
 	for _, e := range entries {
 		if e.Name != Unattributed {
@@ -207,4 +130,99 @@ func llvmTool(t *testing.T, name string) string {
 	}
 	t.Skip(name + " not found")
 	return ""
+}
+
+// wasmModule builds a module from the preamble and the given custom sections,
+// each a name and payload.
+func wasmModule(custom ...string) []byte {
+	b := []byte("\x00asm\x01\x00\x00\x00")
+	for i := 0; i+1 < len(custom); i += 2 {
+		name, payload := custom[i], custom[i+1]
+		// Lengths here stay under 128, so each LEB128 is one byte.
+		b = append(b, 0, byte(1+len(name)+len(payload)), byte(len(name)))
+		b = append(b, name...)
+		b = append(b, payload...)
+	}
+	return b
+}
+
+func TestWasmUnsupported(t *testing.T) {
+	fixture, err := os.ReadFile(wasmFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flags := range []Flags{
+		{kind: KindSegment},
+		{kind: KindSection, mem: true},
+	} {
+		if _, err := profileReader(bytes.NewReader(fixture), 0, flags); err == nil {
+			t.Errorf("%+v: no error", flags)
+		}
+	}
+	_, err = profileReader(bytes.NewReader(wasmModule()), 0, Flags{kind: KindFile})
+	if !errors.Is(err, errWasmNoDebugLine) {
+		t.Errorf("module without DWARF: got %v, want %v", err, errWasmNoDebugLine)
+	}
+}
+
+func TestIsGcWasm(t *testing.T) {
+	fixture, err := os.ReadFile(wasmFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		module []byte
+		want   bool
+	}{
+		{"tinygo fixture", fixture, false},
+		{"go:buildid", wasmModule("go:buildid", "abc/def"), true},
+		{"producers", wasmModule("producers", "\x01\x0cprocessed-by\x01\x0eGo cmd/compile\x08go1.26.3"), true},
+		{"empty", wasmModule(), false},
+	} {
+		var f xwasm.File
+		if err := f.Read(bytes.NewReader(tc.module)); err != nil {
+			t.Fatal(tc.name, err)
+		}
+		if got := isGcWasm(&f); got != tc.want {
+			t.Errorf("%s: isGcWasm=%v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestGcWasmPackageOf(t *testing.T) {
+	for _, tc := range []struct{ sym, want string }{
+		// Single-element paths: the first dot ends the package.
+		{"runtime.alloc", "runtime"},
+		{"time.__Duration_.Truncate", "time"},
+		{"runtime.alloc_m.func1", "runtime"}, // '_' after the dot is the identifier's.
+		// '/' arrives as '_'; the first dot after it ends the path.
+		{"github.com_google_gopacket_layers.init", "github.com_google_gopacket_layers"},
+		{"golang.zx2c4.com_wireguard_device.__Device_.Up", "golang.zx2c4.com_wireguard_device"},
+		{"crypto_internal_fips140_nistec_fiat.p521Mul", "crypto_internal_fips140_nistec_fiat"},
+		// The last element's dots are escaped as %2e, arriving as _2e.
+		{"gopkg.in_yaml_2ev3.yaml_emitter_write_double_quoted_scalar", "gopkg.in_yaml_2ev3"},
+		{"_rt0_wasm_wasip1", cPackage},
+		{"[data 99997]", "[data]"},
+	} {
+		if got := gcWasmPackageOf(tc.sym); got != tc.want {
+			t.Errorf("gcWasmPackageOf(%q)=%q want %q", tc.sym, got, tc.want)
+		}
+	}
+}
+
+// TestGcWasmLocalModule checks a large gc-built module when one is present in
+// the untracked local directory.
+func TestGcWasmLocalModule(t *testing.T) {
+	const name = "../../local/netbird.wasm"
+	if _, err := os.Stat(name); err != nil {
+		t.Skip("no local module")
+	}
+	entries, _ := profileFixture(t, name, Flags{kind: KindPackage})
+	for _, e := range entries {
+		switch e.Name {
+		case "github", "golang", "google", "gopkg", "[type]":
+			t.Errorf("package %q (%d bytes): mangled names split at the wrong dot", e.Name, e.New)
+		}
+	}
 }

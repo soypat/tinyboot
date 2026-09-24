@@ -209,15 +209,15 @@ func profilePackages(f *xelf.File, mem bool) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return packageEntries(syms), nil
+	return packageEntries(syms, packageOf), nil
 }
 
 // packageEntries rolls symbol entries up by package.
-func packageEntries(syms []Entry) []Entry {
+func packageEntries(syms []Entry, pkgOf func(sym string) string) []Entry {
 	order := make([]string, 0, 32)
 	byPkg := make(map[string]*Entry, 32)
 	for _, e := range syms {
-		name := packageOf(e.Name)
+		name := pkgOf(e.Name)
 		agg, ok := byPkg[name]
 		if !ok {
 			order = append(order, name)
@@ -251,8 +251,8 @@ const typePunct = ":{}[](),; "
 // A package path may itself contain dots ("github.com/soypat/x.Func"), so the
 // boundary is the first dot after the final slash rather than the last dot.
 func packageOf(sym string) string {
-	if sym == Unattributed {
-		return Unattributed
+	if pkg, ok := bucketOf(sym); ok {
+		return pkg
 	}
 	s := sym
 	// The gc linker names its own generated symbols with a colon and no
@@ -314,6 +314,22 @@ func packageOf(sym string) string {
 		return cPackage
 	}
 	return pkg
+}
+
+// bucketOf reports the package of one of bindiff's own synthetic names, which
+// are bracketed so no real symbol can collide with them: [unattributed], and
+// the placeholders a WebAssembly module's unnamed items get, "[func 12]" and
+// "[data 7]". A placeholder's bucket is its kind, so that thousands of unnamed
+// items roll up into one row -- "[func]", "[data]" -- rather than each passing
+// for a package, or for a spelled-out type because of the bracket.
+func bucketOf(sym string) (string, bool) {
+	if !strings.HasPrefix(sym, "[") {
+		return "", false
+	}
+	if kind, _, ok := strings.Cut(sym, " "); ok {
+		return kind + "]", true
+	}
+	return sym, true
 }
 
 func isAllDigits(s string) bool {

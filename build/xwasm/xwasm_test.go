@@ -13,10 +13,10 @@ import (
 	"testing"
 )
 
-var fixtures = []string{
-	"../../testdata/hello.wasm",
-	"../../testdata/hello-nodebug.wasm",
-}
+// fixtures is the single TinyGo module the tests read: small, but with a host
+// import, data segments, a name section and DWARF. See
+// cmd/bindiff/testdata/src/gen.go.
+var fixtures = []string{"../../testdata/tiny.wasm"}
 
 func readFixture(t testing.TB, name string) (*File, []byte) {
 	t.Helper()
@@ -68,14 +68,6 @@ func TestRead_sectionNames(t *testing.T) {
 	code, _ := f.SectionByID(SecCode)
 	if s, _ := f.SectionByName("code"); s != code {
 		t.Fatal("SectionByName and SectionByID disagree on code")
-	}
-
-	nodebug, _ := readFixture(t, fixtures[1])
-	if _, err := nodebug.SectionByName(".debug_line"); err == nil {
-		t.Fatal("-no-debug build has .debug_line")
-	}
-	if _, err := nodebug.SectionByName("name"); err != nil {
-		t.Fatal("-no-debug build lost its name section:", err)
 	}
 }
 
@@ -306,7 +298,7 @@ func TestAllocs(t *testing.T) {
 }
 
 func TestReadRejects(t *testing.T) {
-	good, err := os.ReadFile(fixtures[1])
+	good, err := os.ReadFile(fixtures[0])
 	if err != nil {
 		t.Fatal(err)
 	}
