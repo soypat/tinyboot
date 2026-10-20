@@ -2,10 +2,11 @@ package xelf
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"math"
+
+	"github.com/soypat/tinyboot/build"
 )
 
 type File struct {
@@ -18,8 +19,8 @@ type File struct {
 	buf [fileBufSize]byte
 	// strbuf is the fill buffer for reading string-table entries. It is separate
 	// from buf because a caller may pass buf itself as the destination to append
-	// a name into -- SectionByName does -- and a name spanning more than one
-	// read would otherwise have its own bytes overwritten by the next fill.
+	// a name into, and a name spanning more than one read would otherwise have
+	// its own bytes overwritten by the next fill.
 	strbuf [fileBufSize]byte
 }
 
@@ -33,42 +34,47 @@ func (f *File) NumProgs() int {
 	return int(f.hdr.Phnum)
 }
 
-// Read parses the underlying ELF file in r. It reads only the main ELF, section and prog segment headers.
-// The ELF binary is expected to start at position 0 in the ReaderAt.
-func (f *File) Read(r io.ReaderAt) error {
-	buf := f.buf[:]
-	if _, err := r.ReadAt(buf[:64], 0); err != nil {
-		return err
+// ReadHeader reads and validates the ELF header of the binary in r through
+// f's scratch, leaving what f describes untouched. For a binary with more
+// sections than the header's fields can count, it resolves the true count and
+// string table index from the initial section header.
+//
+// The header's Shnum and Phnum are the sizes of the tables [File.Read] keeps,
+// so a caller holding its memory to a bound reads the header first and decides
+// whether to go on.
+func (f *File) ReadHeader(r io.ReaderAt) (Header, error) {
+	return readHeader(r, f.buf[:])
+}
+
+// readHeader is ReadHeader through buf, which must hold an ELF64 header.
+func readHeader(r io.ReaderAt, buf []byte) (Header, error) {
+	if _, err := r.ReadAt(buf[:headerSize64], 0); err != nil {
+		return Header{}, err
 	}
 	header, _, err := DecodeHeader(buf)
 	if err != nil {
-		return err
+		return Header{}, err
 	}
 	// If the number of sections is greater than or equal to SHN_LORESERVE
 	// (0xff00), shnum has the value zero and the actual number of section
 	// header table entries is contained in the sh_size field of the section
 	// header at index 0.
-	bo := header.ByteOrder()
 	if header.Shoff > 0 && header.Shnum == 0 {
-		println("special initial section")
 		n, err := r.ReadAt(buf[:sectionHeaderSize64], int64(header.Shoff))
 		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), n)
+			return Header{}, err
 		}
-		sh, _, err := DecodeSectionHeader(buf[:n], header.Class, bo)
+		sh, _, err := DecodeSectionHeader(buf[:n], header.Class, header.ByteOrder())
 		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), sh)
-		}
-		err = sh.Validate(header.Class)
-		if err != nil {
-			return makeFormatErr(header.Shoff, err.Error(), sh)
+			return Header{}, err
+		} else if err = sh.Validate(header.Class); err != nil {
+			return Header{}, err
 		}
 		header.Shnum = uint16(sh.SizeOnFile)
-
 		if sh.Type != SecTypeNull {
-			return makeFormatErr(header.Shoff, "invalid type of the initial section", sh.Type)
+			return Header{}, build.ErrBadInitialSection
 		} else if SectionIndex(header.Shnum) < SecIdxReserveLo {
-			return makeFormatErr(header.Shoff, "invalid shnum contained in sh_size", header.Shnum)
+			return Header{}, build.ErrBadExtendedShnum
 		}
 		// If the section name string table section index is greater than or
 		// equal to SHN_LORESERVE (0xff00), this member has the value
@@ -77,24 +83,42 @@ func (f *File) Read(r io.ReaderAt) error {
 		// section header at index 0.
 		if int(header.Shstrndx) == int(SecIdxXindex) {
 			if sh.Link > math.MaxUint16 {
-				return makeFormatErr(header.Shoff, "initial section link overflows uint16 as shstrndx", sh.Link)
+				return Header{}, build.ErrBadShstrndx
 			}
 			header.Shstrndx = uint16(sh.Link)
-			if header.Shstrndx < uint16(SecIdxReserveLo) {
-				return makeFormatErr(header.Shoff, "invalid shstrndx contained in sh_link", header.Shstrndx)
-			} else if header.Shstrndx >= header.Shnum {
-				return makeFormatErr(header.Shoff, "shstrndx from sh_link in initial section greater than shnum", header.Shstrndx)
+			if header.Shstrndx < uint16(SecIdxReserveLo) || header.Shstrndx >= header.Shnum {
+				return Header{}, build.ErrBadShstrndx
 			}
 		}
 	}
-	err = header.Validate()
+	if err := header.Validate(); err != nil {
+		return Header{}, err
+	}
+	return header, nil
+}
+
+// Read parses the underlying ELF file in r. It reads only the main ELF, section and prog segment headers.
+// The ELF binary is expected to start at position 0 in the ReaderAt.
+//
+// Read keeps its tables from one binary to the next, growing them only for a
+// binary with more headers than any before it. A caller holding its memory to
+// a bound checks the counts with [File.ReadHeader] first. On error f is left
+// describing no binary.
+func (f *File) Read(r io.ReaderAt) error {
+	// The tables are filled in place, so a failure partway would leave them
+	// describing half of this binary under the last one's header.
+	progs, sections := f.progs[:0], f.sections[:0]
+	f.hdr, f.progs, f.sections = Header{}, progs, sections
+	buf := f.buf[:]
+	header, err := readHeader(r, buf)
 	if err != nil {
 		return err
 	}
+	bo := header.ByteOrder()
 
 	phentsize := int64(header.Phentsize)
 	progHeaderOff := int64(header.Phoff)
-	progs := make([]prog, header.Phnum)
+	progs = slicesGrow(progs, int(header.Phnum))
 	progBuf := buf[:progHeaderSize64]
 	if len(progBuf) > int(phentsize) {
 		progBuf = progBuf[:phentsize]
@@ -112,19 +136,19 @@ func (f *File) Read(r io.ReaderAt) error {
 		}
 		err = ph.Validate(header.Class)
 		if err != nil {
-			return makeFormatErr(uint64(fileOff), err.Error(), ph)
+			return err
 		}
-		progs[i] = prog{
+		progs = append(progs, prog{
 			ProgHeader: ph,
 			sr:         *io.NewSectionReader(r, int64(ph.Off), int64(ph.SizeOnFile)),
-		}
+		})
 	}
 
 	c := sliceCap[section](uint64(header.Shnum))
 	if c < 0 {
-		return makeFormatErr(0, "too many sections", header.Shnum)
+		return build.ErrTooManySections
 	}
-	sections := make([]section, c)
+	sections = slicesGrow(sections, c)
 	shentsize := int64(header.Shentsize)
 	sectBase := int64(header.Shoff)
 	sectBuf := buf[:sectionHeaderSize64]
@@ -144,18 +168,14 @@ func (f *File) Read(r io.ReaderAt) error {
 		}
 		err = sh.Validate(header.Class)
 		if err != nil {
-			return makeFormatErr(uint64(fileOff), err.Error(), err)
+			return err
 		}
-		sections[i] = section{
+		sections = append(sections, section{
 			SectionHeader: sh,
 			sr:            *io.NewSectionReader(r, int64(sh.Offset), int64(sh.SizeOnFile)),
-		}
+		})
 	}
-	*f = File{
-		hdr:      header,
-		progs:    progs,
-		sections: sections,
-	}
+	f.hdr, f.progs, f.sections = header, progs, sections
 	return nil
 }
 
@@ -167,7 +187,7 @@ func (f *File) Header() Header {
 // Prog returns the program at progIdx index.
 func (f *File) Prog(progIdx int) (FileProg, error) {
 	if progIdx >= len(f.progs) || progIdx < 0 {
-		return FileProg{}, errors.New("OOB/negative prog index")
+		return FileProg{}, build.ErrIndexOutOfRange
 	}
 	return FileProg{
 		f:      f,
@@ -178,7 +198,7 @@ func (f *File) Prog(progIdx int) (FileProg, error) {
 // Section returns the section at sectionIdx index.
 func (f *File) Section(sectionIdx int) (FileSection, error) {
 	if sectionIdx >= len(f.sections) || sectionIdx < 0 {
-		return FileSection{}, errors.New("OOB/negative section index")
+		return FileSection{}, build.ErrIndexOutOfRange
 	}
 	return FileSection{
 		f:      f,
@@ -194,15 +214,11 @@ func (f *File) SectionByName(name string) (FileSection, error) {
 		if err != nil {
 			return FileSection{}, err
 		}
-		buf, err := s.AppendName(f.buf[:0])
-		if err != nil {
-			return FileSection{}, err
-		}
-		if string(buf) == name {
+		if s.NameEquals(name) {
 			return s, nil
 		}
 	}
-	return FileSection{}, errors.New("section by index not found")
+	return FileSection{}, build.ErrSectionNotFound
 }
 
 // SectionByType returns the first section in f with the given type.
@@ -217,7 +233,7 @@ func (f *File) SectionByType(typ SectionType) (FileSection, error) {
 			return s, nil
 		}
 	}
-	return FileSection{}, errors.New("section by type not found")
+	return FileSection{}, build.ErrSectionNotFound
 }
 
 // FileSection is the handle to a file's section.
@@ -256,6 +272,78 @@ func (fs FileSection) AppendName(dst []byte) (_ []byte, err error) {
 	return fs.f.AppendTableStr(dst, fs.ptr().Name)
 }
 
+// NameLen returns the length of the section's name.
+func (fs FileSection) NameLen() (int, error) {
+	shstr, err := fs.f.nameTable()
+	if err != nil || shstr.f == nil {
+		return 0, err
+	}
+	return shstr.strLen(int64(fs.ptr().Name))
+}
+
+// ReadName reads the section's name into dst, which [FileSection.NameLen]
+// sizes, and returns its length. A dst too short for the name fails with
+// [io.ErrShortBuffer]. Unlike [FileSection.AppendName] it never allocates.
+func (fs FileSection) ReadName(dst []byte) (int, error) {
+	shstr, err := fs.f.nameTable()
+	if err != nil || shstr.f == nil {
+		return 0, err
+	}
+	name, err := shstr.appendStr(dst[:0:len(dst)], int64(fs.ptr().Name), false)
+	return len(name), err
+}
+
+// NameEquals reports whether the section is named name. The name is compared
+// as it is read, through the File's scratch, so nothing is allocated however
+// long it is. A name that cannot be read equals nothing.
+func (fs FileSection) NameEquals(name string) bool {
+	shstr, err := fs.f.nameTable()
+	if err != nil {
+		return false
+	} else if shstr.f == nil {
+		return name == "" // No string table: every section is unnamed.
+	}
+	return shstr.strEquals(int64(fs.ptr().Name), name)
+}
+
+// nameTable returns the section name string table, or a zero FileSection for a
+// binary without one, whose sections are all unnamed.
+func (f *File) nameTable() (FileSection, error) {
+	strndx := int(f.hdr.Shstrndx)
+	if strndx == 0 {
+		return FileSection{}, nil
+	}
+	shstr, err := f.Section(strndx)
+	if err != nil {
+		return FileSection{}, err
+	} else if shstr.ptr().Type != SecTypeStrTab {
+		return FileSection{}, build.ErrNotStringTable
+	}
+	return shstr, nil
+}
+
+// strLen returns the length of the null-terminated string at start in string
+// table fs, scanning through the File's scratch.
+func (fs FileSection) strLen(start int64) (int, error) {
+	size := fs.Size()
+	if start < 0 || start >= size {
+		return 0, build.ErrStringOutOfRange
+	}
+	for n := int64(0); start+n < size; {
+		chunk, err := fs.readAt(fs.f.strbuf[:], start+n)
+		if err != nil && err != io.ErrNoProgress {
+			return 0, err
+		} else if len(chunk) == 0 {
+			break
+		}
+		if end := bytes.IndexByte(chunk, 0); end >= 0 {
+			return int(n) + end, nil
+		}
+		n += int64(len(chunk))
+	}
+	return 0, build.ErrUnterminatedString
+}
+
 func (fs FileSection) Name() (string, error) {
 	str, err := fs.AppendName(nil)
 	if err != nil {
@@ -280,16 +368,16 @@ func (fs FileSection) Open() *io.SectionReader {
 func (fs FileSection) AppendData(dst []byte) (_ []byte, err error) {
 	s := fs.ptr()
 	if s.Type == SecTypeNobits {
-		return dst, errReadFromNobits
+		return dst, build.ErrNoContents
 	} else if s.Flags&SectionFlag(secFlagCompressed) != 0 {
-		return dst, errCompressionUnsupported
+		return dst, build.ErrCompressionUnsupported
 	}
 	sz := fs.Size()
 	if sz == 0 {
 		return dst, nil
 	}
 	if sliceCapWithSize(1, uint64(sz)) < 0 || sz+int64(len(dst)) > math.MaxInt {
-		return dst, errors.New("section too large")
+		return dst, build.ErrSectionTooLarge
 	}
 	dst = slicesGrow(dst, int(sz))
 	toRead := dst[len(dst) : len(dst)+int(sz)]
@@ -298,7 +386,7 @@ func (fs FileSection) AppendData(dst []byte) (_ []byte, err error) {
 	if err != nil {
 		return dst, err
 	} else if len(result) != len(toRead) {
-		return dst, fmt.Errorf("short section read sz=%d sr=%d read=%d", sz, s.sr.Size(), len(result))
+		return dst, io.ErrUnexpectedEOF
 	}
 	dst = dst[:len(dst)+int(sz)]
 	return dst, nil
@@ -331,7 +419,7 @@ func (fp FileProg) Open() io.ReadSeeker { return io.NewSectionReader(&fp.ptr().s
 func (fs FileSection) readAt(buf []byte, offset int64) ([]byte, error) {
 	s := fs.ptr()
 	if s.Type == SecTypeNobits {
-		return nil, errReadFromNobits
+		return nil, build.ErrNoContents
 	}
 	return readSRInto(buf, &s.sr, offset)
 }
@@ -345,7 +433,7 @@ func (fs FileSection) OfProg() (progIdx int, err error) {
 	sz := fs.Size()
 	s := fs.ptr()
 	if s.Type != SecTypeProgBits || sz <= 0 {
-		return -1, errors.New("section does not correspond to prog memory")
+		return -1, build.ErrNotInSegment
 	}
 
 	sAddr := s.Addr
@@ -363,13 +451,13 @@ func (fs FileSection) OfProg() (progIdx int, err error) {
 
 		if aliases(sAddr, sAddr+1, pAddr, pEnd) && aliases(sEnd-1, sEnd, pAddr, pEnd) {
 			if progIdx >= 0 {
-				return -1, errSectionAliasDup
+				return -1, build.ErrSegmentAmbiguous
 			}
 			progIdx = i
 		}
 	}
 	if progIdx < 0 {
-		return -1, errors.New("section does not correspond to a prog")
+		return -1, build.ErrNotInSegment
 	}
 	return progIdx, nil
 }
@@ -400,7 +488,7 @@ func (f *File) AppendSymStr(dst []byte, symName uint32) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return strTab.appendStr(dst, int64(symName))
+	return strTab.appendStr(dst, int64(symName), true)
 }
 
 // AppendTableStr gets the null-terminated string starting at start in the ELF string table and appends it to dst and returns the result.
@@ -415,38 +503,75 @@ func (f *File) AppendTableStr(dst []byte, start uint32) ([]byte, error) {
 	}
 	s := shstr.ptr()
 	if s.Type != SecTypeStrTab {
-		return dst, makeFormatErr(s.Offset, "strndx points to a non-stringtable section type", s.Type)
+		return dst, build.ErrNotStringTable
 	}
-	dst, err = shstr.appendStr(dst, int64(start))
+	dst, err = shstr.appendStr(dst, int64(start), true)
 	if err != nil {
 		return dst, err
 	}
 	return dst, nil
 }
 
-// appendStr extracts a null terminated string from an ELF string table starting at start and appends it to dst.
-func (fs FileSection) appendStr(dst []byte, start int64) ([]byte, error) {
-	n0 := len(dst)
+// strEquals reports whether the null-terminated string at start in string
+// table fs is s, reading no more of it than could still match.
+func (fs FileSection) strEquals(start int64, s string) bool {
 	size := fs.Size()
-	if start < 0 {
-		return dst, errors.New("bad section header name value")
-	} else if start >= size {
-		return dst, errors.New("start of string exceeds section size")
+	if start < 0 || start >= size {
+		return false
 	}
 	for off := start; off < size; {
-		secData, err := fs.readAt(fs.f.strbuf[:], off)
+		// What is left of s and its terminator decide the match.
+		chunk, err := fs.readAt(fs.f.strbuf[:min(len(fs.f.strbuf), len(s)+1)], off)
+		if err != nil || len(chunk) == 0 {
+			return false
+		}
+		end := bytes.IndexByte(chunk, 0)
+		if end >= 0 {
+			chunk = chunk[:end]
+		}
+		if len(chunk) > len(s) || string(chunk) != s[:len(chunk)] {
+			return false
+		}
+		s = s[len(chunk):]
+		if end >= 0 {
+			return s == ""
+		}
+		off += int64(len(chunk))
+	}
+	return false // Unterminated.
+}
+
+// appendStr appends the null-terminated string at start in string table fs to
+// dst, reading through the File's scratch. Without grow, a string that does not
+// fit in dst's spare capacity fails with [io.ErrShortBuffer], so dst is never
+// reallocated. On error dst comes back as it was passed.
+func (fs FileSection) appendStr(dst []byte, start int64, grow bool) ([]byte, error) {
+	n0 := len(dst)
+	size := fs.Size()
+	if start < 0 || start >= size {
+		return dst, build.ErrStringOutOfRange
+	}
+	for off := start; off < size; {
+		chunk, err := fs.readAt(fs.f.strbuf[:], off)
 		if err != nil {
 			return dst[:n0], err
-		} else if len(secData) == 0 {
+		} else if len(chunk) == 0 {
 			break
 		}
-		if strEnd := bytes.IndexByte(secData, 0); strEnd >= 0 {
-			return append(dst, secData[:strEnd]...), nil
+		end := bytes.IndexByte(chunk, 0)
+		if end >= 0 {
+			chunk = chunk[:end]
 		}
-		dst = append(dst, secData...)
-		off += int64(len(secData))
+		if !grow && len(chunk) > cap(dst)-len(dst) {
+			return dst[:n0], io.ErrShortBuffer
+		}
+		dst = append(dst, chunk...)
+		if end >= 0 {
+			return dst, nil
+		}
+		off += int64(len(chunk))
 	}
-	return dst[:n0], errors.New("unterminated string in string table")
+	return dst[:n0], build.ErrUnterminatedString
 }
 
 func readSRInto(buf []byte, sr *io.SectionReader, offset int64) ([]byte, error) {
@@ -477,11 +602,11 @@ func readSRInto(buf []byte, sr *io.SectionReader, offset int64) ([]byte, error) 
 type nobitsSectionReader struct{}
 
 func (*nobitsSectionReader) ReadAt(p []byte, off int64) (n int, err error) {
-	return 0, errReadFromNobits
+	return 0, build.ErrNoContents
 }
 
 type unsupportedCompressionReader struct{}
 
 func (*unsupportedCompressionReader) ReadAt(p []byte, off int64) (n int, err error) {
-	return 0, errCompressionUnsupported
+	return 0, build.ErrCompressionUnsupported
 }

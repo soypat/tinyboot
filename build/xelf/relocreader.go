@@ -2,10 +2,10 @@ package xelf
 
 import (
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"io"
 	"sort"
+
+	"github.com/soypat/tinyboot/build"
 )
 
 // relocField is one relocation reduced to the edit it makes: write size bytes
@@ -33,7 +33,7 @@ type relocField struct {
 // target, which a streaming reader does not have in one piece.
 func rangeRelocFields(rels []byte, syms []Sym, hdr Header, fn func(relocField)) (RelocError, error) {
 	if len(rels)%8 != 0 {
-		return 0, errors.New("length of relocation section not multiple of 8")
+		return 0, build.ErrTableNotMultiple
 	}
 	if err := hdr.Data.Validate(); err != nil {
 		return 0, err
@@ -88,9 +88,9 @@ func rangeRelocFields(rels []byte, syms []Sym, hdr Header, fn func(relocField)) 
 			}
 		}
 	case hdr.Class != Class32 && hdr.Class != Class64:
-		return fail, errBadClass
+		return fail, build.ErrBadClass
 	default:
-		return fail, fmt.Errorf("relocation not implemented for tuple (%s, %s)", hdr.Class.String(), hdr.Machine.String())
+		return fail, build.ErrRelocUnsupported
 	}
 	return fail, nil
 }

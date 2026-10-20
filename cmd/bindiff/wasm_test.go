@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/soypat/tinyboot/build"
 	"github.com/soypat/tinyboot/build/xwasm"
 )
 
@@ -160,8 +160,8 @@ func TestWasmUnsupported(t *testing.T) {
 		}
 	}
 	_, err = profileReader(bytes.NewReader(wasmModule()), 0, Flags{kind: KindFile})
-	if !errors.Is(err, errWasmNoDebugLine) {
-		t.Errorf("module without DWARF: got %v, want %v", err, errWasmNoDebugLine)
+	if err != build.ErrNoDebugLine {
+		t.Errorf("module without DWARF: got %v, want %v", err, build.ErrNoDebugLine)
 	}
 }
 

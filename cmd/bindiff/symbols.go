@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/soypat/tinyboot/build/xelf"
+	"github.com/soypat/tinyboot/build/xobj"
 )
 
 // placement is one symbol's claim on a range of a section, after overlapping
@@ -15,6 +15,11 @@ type placement struct {
 	section string
 	addr    uint64 // Clamped start address.
 	size    int64  // Clamped size; zero for a symbol wholly covered by another.
+	// inLines marks an address in the space the DWARF line table describes. An
+	// ELF binary has one address space for everything it loads. A WebAssembly
+	// module does not: line addresses are Code section offsets, and a data
+	// segment's offset in its own section would alias them.
+	inLines bool
 }
 
 // tiling is the result of dividing a binary's sections among its symbols.
@@ -24,12 +29,6 @@ type tiling struct {
 	remainder map[string]int64
 	// order preserves section order for deterministic output.
 	order []string
-	// lineSection, when set, names the only section whose placement addresses
-	// are in the address space the DWARF line table describes. An ELF binary
-	// has one address space for everything, and leaves it empty. A WebAssembly
-	// module does not: line addresses are Code section offsets, and a data
-	// segment's offset in its own section would alias them.
-	lineSection string
 }
 
 // claim is one symbol's stake in a section, before overlapping claims are
@@ -49,7 +48,7 @@ func newTiling(nsect, nsyms int) tiling {
 
 // tileSection divides a section of size bytes among claims and records what
 // they leave over. A section with no claims and no bytes is left out.
-func (t *tiling) tileSection(section string, size int64, claims []claim) {
+func (t *tiling) tileSection(section string, size int64, claims []claim, inLines bool) {
 	if len(claims) == 0 {
 		if size > 0 {
 			t.order = append(t.order, section)
@@ -89,6 +88,7 @@ func (t *tiling) tileSection(section string, size int64, claims []claim) {
 			section: section,
 			addr:    start,
 			size:    size,
+			inLines: inLines,
 		})
 	}
 	t.remainder[section] = size - attributed
@@ -100,7 +100,7 @@ func (t *tiling) tileSection(section string, size int64, claims []claim) {
 // 92-97% covered, the rest being alignment padding, compiler-emitted stubs and
 // symbols whose st_size is zero. The shortfall per section is reported as
 // [unattributed] so the rows still sum to the section size.
-func profileSymbols(f *xelf.File, mem bool) ([]Entry, error) {
+func profileSymbols(f *xobj.File, mem bool) ([]Entry, error) {
 	t, err := tileSymbols(f, mem)
 	if err != nil {
 		return nil, err
@@ -131,85 +131,126 @@ func symbolEntries(t tiling) []Entry {
 }
 
 // tileSymbols divides each section's bytes among the symbols that land in it.
-func tileSymbols(f *xelf.File, mem bool) (tiling, error) {
-	var t tiling
-	syms, err := f.AppendTableSymbols(nil)
-	if err != nil {
-		return t, err
+// Placements carry line-table addresses: an ELF symbol's value, a WebAssembly
+// function's offset in the Code section.
+func tileSymbols(f *xobj.File, mem bool) (tiling, error) {
+	// Resolve sections once; symbols reference them by index.
+	type section struct {
+		name     string
+		size     int64 // Negative for a section left out of a memory profile.
+		inLines  bool
+		lineBase uint64
 	}
-	nsect := f.NumSections()
-
-	// Resolve section names once; symbols reference sections by index.
-	secNames := make([]string, nsect)
-	secSizes := make([]int64, nsect)
-	var nameBuf []byte
-	for i := 0; i < nsect; i++ {
-		s, err := f.Section(i)
+	var names nameBuf
+	sections := make([]section, f.NumSections())
+	for s := range f.Sections {
+		name, err := names.section(f, s.Index)
 		if err != nil {
-			return t, err
+			return tiling{}, err
 		}
-		sh := s.SectionHeader()
-		nameBuf, err = s.AppendName(nameBuf[:0])
-		if err != nil {
-			return t, err
+		sec := section{name: name, size: int64(s.Size), inLines: s.InLines, lineBase: s.LineBase}
+		if mem {
+			sec.size = int64(s.MemSize)
+			if !s.Loaded {
+				sec.size = -1 // Not resident.
+			}
 		}
-		secNames[i] = string(nameBuf)
-		switch {
-		case mem && sh.Flags&secFlagAlloc == 0:
-			secSizes[i] = -1 // Not resident; excluded from a memory profile.
-		case !mem && sh.Type == xelf.SecTypeNobits:
-			secSizes[i] = 0 // Occupies no file bytes.
-		default:
-			secSizes[i] = int64(sh.SizeOnFile)
-		}
+		sections[s.Index] = sec
+	}
+	if err := f.Err(); err != nil {
+		return tiling{}, err
 	}
 
 	// Bucket symbols by section so each section can be tiled independently.
-	bySection := make(map[int][]claim)
-	var strBuf []byte
-	for _, sym := range syms {
-		typ := xelf.SymType(sym.Info & 0xf)
-		if typ != xelf.SymTypeFunc && typ != xelf.SymTypeObject {
+	bySection := make([][]claim, len(sections))
+	var nsyms int
+	for sym := range f.Symbols {
+		sec := &sections[sym.Section]
+		if sec.size <= 0 {
 			continue
 		}
-		idx := int(sym.Shndx)
-		// SHN_ABS, SHN_COMMON and friends do not name a real section.
-		if idx <= 0 || idx >= nsect || xelf.SectionIndex(sym.Shndx) >= xelf.SecIdxReserveLo {
-			continue
-		}
-		if secSizes[idx] <= 0 {
-			continue
-		}
-		strBuf, err = f.AppendSymStr(strBuf[:0], sym.Name)
+		name, err := names.symbol(f, sym)
 		if err != nil {
-			return t, fmt.Errorf("resolving symbol name: %w", err)
+			return tiling{}, fmt.Errorf("symbols: %w", err)
 		}
-		if len(strBuf) == 0 {
-			continue
-		}
-		bySection[idx] = append(bySection[idx], claim{
-			name:  string(strBuf),
-			start: sym.Value,
+		bySection[sym.Section] = append(bySection[sym.Section], claim{
+			name:  name,
+			start: sec.lineBase + sym.Off,
 			size:  sym.Size,
 		})
+		nsyms++
+	}
+	if err := f.Err(); err != nil {
+		return tiling{}, fmt.Errorf("symbols: %w", err)
 	}
 
-	t = newTiling(nsect, len(syms))
-	for idx := 0; idx < nsect; idx++ {
-		t.tileSection(secNames[idx], secSizes[idx], bySection[idx])
+	t := newTiling(len(sections), nsyms)
+	for i, sec := range sections {
+		t.tileSection(sec.name, sec.size, bySection[i], sec.inLines)
 	}
 	return t, nil
+}
+
+// nameBuf reads names through one buffer, grown to the longest name read.
+type nameBuf []byte
+
+// fit returns the buffer cut to n bytes, growing it first if it is shorter.
+func (nb *nameBuf) fit(n int) []byte {
+	if n > len(*nb) {
+		*nb = make([]byte, max(n, 2*len(*nb)))
+	}
+	return (*nb)[:n]
+}
+
+func (nb *nameBuf) section(f *xobj.File, i int) (string, error) {
+	n, err := f.SectionNameLen(i)
+	if err != nil {
+		return "", err
+	}
+	name := nb.fit(n)
+	if _, err := f.ReadSectionName(name, i); err != nil {
+		return "", err
+	}
+	return string(name), nil
+}
+
+// symbol returns a symbol's name, or for one the binary leaves unnamed a
+// placeholder naming its index space: "[func 12]", "[data 7]". Placeholders are
+// bracketed, like bindiff's other synthetic names, so [packageOf] can tell them
+// from symbols. The gc toolchain names no WebAssembly data segments at all, so
+// on its modules every segment is one of these.
+func (nb *nameBuf) symbol(f *xobj.File, sym xobj.Symbol) (string, error) {
+	n, err := f.SymbolNameLen(sym)
+	if err != nil {
+		return "", err
+	}
+	if n == 0 {
+		space := "data"
+		if sym.Func {
+			space = "func"
+		}
+		return fmt.Sprintf("[%s %d]", space, sym.Index), nil
+	}
+	name := nb.fit(n)
+	if _, err := f.ReadSymbolName(name, sym); err != nil {
+		return "", err
+	}
+	return string(name), nil
 }
 
 // profilePackages rolls a symbol profile up by the package each symbol belongs
 // to. TinyGo emits fully package-qualified symbol names, so this needs no debug
 // information; C symbols have no package and collect under [c].
-func profilePackages(f *xelf.File, mem bool) ([]Entry, error) {
+func profilePackages(f *xobj.File, mem bool) ([]Entry, error) {
 	syms, err := profileSymbols(f, mem)
 	if err != nil {
 		return nil, err
 	}
-	return packageEntries(syms, packageOf), nil
+	pkgOf := packageOf
+	if w, ok := f.Wasm(); ok && isGcWasm(w) {
+		pkgOf = gcWasmPackageOf
+	}
+	return packageEntries(syms, pkgOf), nil
 }
 
 // packageEntries rolls symbol entries up by package.

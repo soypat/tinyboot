@@ -1,9 +1,10 @@
 package xwasm
 
 import (
-	"errors"
 	"io"
 	"math"
+
+	"github.com/soypat/tinyboot/build"
 )
 
 // Func locates one function body in the Code section.
@@ -32,7 +33,8 @@ func (fn Func) BodyOffset() uint64 { return fn.Offset + uint64(fn.PrefixSize) }
 func (fn Func) End() uint64 { return fn.BodyOffset() + fn.Size }
 
 // CodeReader walks the function bodies of a module's Code section through a
-// caller-owned buffer, without holding anything per function.
+// caller-owned buffer, without holding anything per function. Bodies come one
+// at a time from [CodeReader.Next], or all at once from [CodeReader.Funcs].
 //
 // A CodeReader is reusable: [CodeReader.Reset] points it at another module and
 // keeps the buffer. The buffer belongs to the reader from Reset until the next
@@ -42,15 +44,18 @@ type CodeReader struct {
 	start    int64 // File offset of the Code section's contents.
 	count    uint32
 	imported uint32
+	next     uint32 // Ordinal of the body Next reads.
+	done     bool
 	err      error
 }
 
-// Reset points cr at f's Code section, reading through buf. buf only needs to
-// hold a few bytes at a time: bodies are skipped, never read. Larger buffers
-// mean fewer reads. A module with no Code section yields no functions.
+// Reset points cr at f's Code section, reading through buf, and rewinds it to
+// the first body. buf only needs to hold a few bytes at a time: bodies are
+// skipped, never read. Larger buffers mean fewer reads. A module with no Code
+// section yields no functions.
 func (cr *CodeReader) Reset(f *File, buf []byte) error {
 	if len(buf) < maxSectionFrame {
-		return BufferTooSmallError{Need: maxSectionFrame, Have: len(buf)}
+		return io.ErrShortBuffer
 	}
 	imported, err := f.NumImportedFuncs()
 	if err != nil {
@@ -60,6 +65,7 @@ func (cr *CodeReader) Reset(f *File, buf []byte) error {
 	sec, err := f.SectionByID(SecCode)
 	if err != nil {
 		cr.c.reset(f.r, buf, 0, 0)
+		cr.Rewind()
 		return nil
 	}
 	sh := sec.SectionHeader()
@@ -72,8 +78,9 @@ func (cr *CodeReader) Reset(f *File, buf []byte) error {
 		return cr.c.err
 	}
 	if uint64(imported)+uint64(cr.count) > math.MaxUint32 {
-		return makeFormatErr(sh.Offset, "function index space overflows uint32", cr.count)
+		return build.ErrIndexSpaceOverflow
 	}
+	cr.Rewind()
 	return nil
 }
 
@@ -84,45 +91,61 @@ func (cr *CodeReader) NumFuncs() uint32 { return cr.count }
 // module's own in the function index space.
 func (cr *CodeReader) NumImportedFuncs() uint32 { return cr.imported }
 
-// Err returns why the last [CodeReader.Funcs] walk stopped early, or nil if it
-// ran to completion or the caller stopped it.
+// Err returns why the walk stopped early, or nil if it ran to completion or the
+// caller stopped it.
 func (cr *CodeReader) Err() error { return cr.err }
 
-// Funcs yields each function body in order of index. It may be called again to
-// walk the bodies anew.
-func (cr *CodeReader) Funcs(yield func(Func) bool) {
+// Rewind positions cr before the first body, to walk the bodies anew.
+func (cr *CodeReader) Rewind() {
 	c := &cr.c
-	cr.err = nil
-	if cr.count == 0 {
+	cr.err, cr.next, cr.done = nil, 0, cr.count == 0
+	if cr.done {
 		return
 	}
 	c.err = nil
 	c.seek(cr.start)
 	c.u32() // Count, validated by Reset.
-	for i := uint32(0); i < cr.count; i++ {
-		prefix := c.pos()
-		size := c.u32()
-		if c.err != nil {
-			break
-		}
-		fn := Func{
-			Index:      cr.imported + i,
-			Offset:     uint64(prefix - cr.start),
-			PrefixSize: uint8(c.pos() - prefix),
-			Size:       uint64(size),
-		}
-		c.skip(fn.Size)
-		if c.err != nil {
-			break
-		}
-		if !yield(fn) {
-			return
-		}
+}
+
+// Next returns the next function body in order of index. It reports false once
+// the bodies run out or the walk fails; [CodeReader.Err] tells which.
+func (cr *CodeReader) Next() (Func, bool) {
+	if cr.done {
+		return Func{}, false
 	}
-	if c.err == nil && c.pos() != c.end {
-		c.fail(makeFormatErr(uint64(c.pos()), "trailing bytes after function bodies", c.end-c.pos()))
+	c := &cr.c
+	if cr.next == cr.count {
+		if c.err == nil && c.pos() != c.end {
+			c.fail(build.ErrTrailingBytes)
+		}
+		return cr.stop()
 	}
-	cr.err = c.err
+	prefix := c.pos()
+	size := c.u32()
+	fn := Func{
+		Index:      cr.imported + cr.next,
+		Offset:     uint64(prefix - cr.start),
+		PrefixSize: uint8(c.pos() - prefix),
+		Size:       uint64(size),
+	}
+	c.skip(fn.Size)
+	if c.err != nil {
+		return cr.stop()
+	}
+	cr.next++
+	return fn, true
+}
+
+func (cr *CodeReader) stop() (Func, bool) {
+	cr.done, cr.err = true, cr.c.err
+	return Func{}, false
+}
+
+// Funcs rewinds cr and yields each function body in order of index.
+func (cr *CodeReader) Funcs(yield func(Func) bool) {
+	cr.Rewind()
+	for fn, ok := cr.Next(); ok && yield(fn); fn, ok = cr.Next() {
+	}
 }
 
 // Import descriptor kinds.
@@ -138,7 +161,7 @@ const (
 // A module with no Import section imports none.
 func (f *File) NumImportedFuncs() (uint32, error) {
 	sec, err := f.SectionByID(SecImport)
-	if errors.Is(err, errNoSection) {
+	if err == build.ErrSectionNotFound {
 		return 0, nil
 	}
 	sh := sec.SectionHeader()
@@ -168,12 +191,12 @@ func (f *File) NumImportedFuncs() (uint32, error) {
 			c.u32() // Type index.
 		default:
 			if c.err == nil {
-				c.fail(makeFormatErr(uint64(c.pos()-1), "unknown import kind", kind))
+				c.fail(build.ErrUnknownImportKind)
 			}
 		}
 	}
 	if c.err == nil && c.pos() != c.end {
-		c.fail(makeFormatErr(uint64(c.pos()), "trailing bytes after imports", c.end-c.pos()))
+		c.fail(build.ErrTrailingBytes)
 	}
 	if c.err == io.EOF {
 		c.err = io.ErrUnexpectedEOF

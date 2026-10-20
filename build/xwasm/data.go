@@ -1,5 +1,9 @@
 package xwasm
 
+import "io"
+
+import "github.com/soypat/tinyboot/build"
+
 // DataSegment locates one segment of the Data section.
 type DataSegment struct {
 	// Index is the segment's index, which the name section keys names by.
@@ -31,7 +35,8 @@ func (s DataSegment) DataOffset() uint64 { return s.Offset + uint64(s.HeaderSize
 func (s DataSegment) End() uint64 { return s.DataOffset() + s.Size }
 
 // DataReader walks the segments of a module's Data section through a
-// caller-owned buffer, without holding anything per segment.
+// caller-owned buffer, without holding anything per segment. Segments come one
+// at a time from [DataReader.Next], or all at once from [DataReader.Segments].
 //
 // A DataReader is reusable: [DataReader.Reset] points it at another module and
 // keeps the buffer. The buffer belongs to the reader from Reset until the next
@@ -40,20 +45,24 @@ type DataReader struct {
 	c     cursor
 	start int64
 	count uint32
+	next  uint32 // Index of the segment Next reads.
+	done  bool
 	err   error
 }
 
-// Reset points dr at f's Data section, reading through buf. As with
-// [CodeReader], segment contents are skipped rather than read, so buf needs to
-// hold only a few bytes. A module with no Data section yields no segments.
+// Reset points dr at f's Data section, reading through buf, and rewinds it to
+// the first segment. As with [CodeReader], segment contents are skipped rather
+// than read, so buf needs to hold only a few bytes. A module with no Data
+// section yields no segments.
 func (dr *DataReader) Reset(f *File, buf []byte) error {
 	if len(buf) < maxSectionFrame {
-		return BufferTooSmallError{Need: maxSectionFrame, Have: len(buf)}
+		return io.ErrShortBuffer
 	}
 	*dr = DataReader{c: dr.c}
 	sec, err := f.SectionByID(SecData)
 	if err != nil {
 		dr.c.reset(f.r, buf, 0, 0)
+		dr.Rewind()
 		return nil
 	}
 	sh := sec.SectionHeader()
@@ -61,60 +70,80 @@ func (dr *DataReader) Reset(f *File, buf []byte) error {
 	dr.c.reset(f.r, buf, dr.start, int64(sh.End()))
 	// The smallest segment is passive and empty: flags and a zero count.
 	dr.count = dr.c.vecLen(2)
-	return dr.c.err
+	if dr.c.err != nil {
+		return dr.c.err
+	}
+	dr.Rewind()
+	return nil
 }
 
 // NumSegments returns the number of segments in the Data section.
 func (dr *DataReader) NumSegments() uint32 { return dr.count }
 
-// Err returns why the last [DataReader.Segments] walk stopped early, or nil if
-// it ran to completion or the caller stopped it.
+// Err returns why the walk stopped early, or nil if it ran to completion or the
+// caller stopped it.
 func (dr *DataReader) Err() error { return dr.err }
 
-// Segments yields each data segment in order of index. It may be called again
-// to walk the segments anew.
-func (dr *DataReader) Segments(yield func(DataSegment) bool) {
+// Rewind positions dr before the first segment, to walk the segments anew.
+func (dr *DataReader) Rewind() {
 	c := &dr.c
-	dr.err = nil
-	if dr.count == 0 {
+	dr.err, dr.next, dr.done = nil, 0, dr.count == 0
+	if dr.done {
 		return
 	}
 	c.err = nil
 	c.seek(dr.start)
 	c.u32() // Count, validated by Reset.
-	for i := uint32(0); i < dr.count; i++ {
-		first := c.pos()
-		seg := DataSegment{Index: i, Offset: uint64(first - dr.start)}
-		switch flags := c.u32(); flags {
-		case 0:
-			seg.Addr, seg.AddrKnown = c.constExpr()
-		case 1:
-			seg.Passive = true
-		case 2:
-			c.u32() // Memory index.
-			seg.Addr, seg.AddrKnown = c.constExpr()
-		default:
-			if c.err == nil {
-				c.fail(makeFormatErr(uint64(first), "invalid data segment flags", flags))
-			}
+}
+
+// Next returns the next data segment in order of index. It reports false once
+// the segments run out or the walk fails; [DataReader.Err] tells which.
+func (dr *DataReader) Next() (DataSegment, bool) {
+	if dr.done {
+		return DataSegment{}, false
+	}
+	c := &dr.c
+	if dr.next == dr.count {
+		if c.err == nil && c.pos() != c.end {
+			c.fail(build.ErrTrailingBytes)
 		}
-		seg.Size = uint64(c.u32())
-		if c.err != nil {
-			break
-		}
-		seg.HeaderSize = uint32(c.pos() - first)
-		c.skip(seg.Size)
-		if c.err != nil {
-			break
-		}
-		if !yield(seg) {
-			return
+		return dr.stop()
+	}
+	first := c.pos()
+	seg := DataSegment{Index: dr.next, Offset: uint64(first - dr.start)}
+	switch flags := c.u32(); flags {
+	case 0:
+		seg.Addr, seg.AddrKnown = c.constExpr()
+	case 1:
+		seg.Passive = true
+	case 2:
+		c.u32() // Memory index.
+		seg.Addr, seg.AddrKnown = c.constExpr()
+	default:
+		if c.err == nil {
+			c.fail(build.ErrBadSegmentFlags)
 		}
 	}
-	if c.err == nil && c.pos() != c.end {
-		c.fail(makeFormatErr(uint64(c.pos()), "trailing bytes after data segments", c.end-c.pos()))
+	seg.Size = uint64(c.u32())
+	seg.HeaderSize = uint32(c.pos() - first)
+	c.skip(seg.Size)
+	if c.err != nil {
+		return dr.stop()
 	}
-	dr.err = c.err
+	dr.next++
+	return seg, true
+}
+
+func (dr *DataReader) stop() (DataSegment, bool) {
+	dr.done, dr.err = true, dr.c.err
+	return DataSegment{}, false
+}
+
+// Segments rewinds dr and yields each data segment in order of index.
+func (dr *DataReader) Segments(yield func(DataSegment) bool) {
+	dr.Rewind()
+	for seg, ok := dr.Next(); ok && yield(seg); seg, ok = dr.Next() {
+	}
 }
 
 // Opcodes that may appear in a constant expression, with the extended-const
@@ -142,7 +171,6 @@ const (
 // expression's value when the expression is a lone integer constant, which is
 // how a linker places a data segment.
 func (c *cursor) constExpr() (v uint64, known bool) {
-	start := c.pos()
 	for n := 0; c.err == nil; n++ {
 		op := c.u8()
 		switch op {
@@ -166,12 +194,12 @@ func (c *cursor) constExpr() (v uint64, known bool) {
 		case opI32Add, opI32Sub, opI32Mul, opI64Add, opI64Sub, opI64Mul:
 		case opPrefixSIMD:
 			if sub := c.u32(); sub != simdV128Const && c.err == nil {
-				c.fail(makeFormatErr(uint64(start), "non-constant SIMD instruction in constant expression", sub))
+				c.fail(build.ErrNonConstantSIMD)
 			}
 			c.skip(16)
 		default:
 			if c.err == nil {
-				c.fail(makeFormatErr(uint64(c.pos()-1), "non-constant instruction in constant expression", op))
+				c.fail(build.ErrNonConstantExpr)
 			}
 		}
 	}

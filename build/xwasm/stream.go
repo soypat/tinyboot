@@ -4,6 +4,7 @@ import (
 	"io"
 
 	"github.com/soypat/lexorg"
+	"github.com/soypat/tinyboot/build"
 )
 
 // cursor reads a section's contents forward through a caller-owned window,
@@ -13,10 +14,9 @@ import (
 //
 // It is xdwarf's streamCursor adapted to WebAssembly's width-bounded LEB128.
 type cursor struct {
-	wr     lexorg.WindowReader
-	bufLen int   // Fill size: the largest span view can present whole.
-	end    int64 // Absolute offset one past the last byte the cursor may read.
-	err    error
+	wr  lexorg.WindowReader
+	end int64 // Absolute offset one past the last byte the cursor may read.
+	err error
 }
 
 // reset binds the cursor to [start, end) of r. It always discards what the
@@ -26,7 +26,7 @@ type cursor struct {
 func (c *cursor) reset(r io.ReaderAt, buf []byte, start, end int64) {
 	c.wr.Reset(r, buf, start)
 	c.wr.Drop()
-	c.bufLen, c.end, c.err = len(buf), end, nil
+	c.end, c.err = end, nil
 }
 
 // pos reports the absolute offset the next read starts at.
@@ -44,7 +44,7 @@ func (c *cursor) seek(off int64) {
 		return
 	}
 	if off > c.end || off < 0 {
-		c.fail(makeFormatErr(uint64(c.pos()), "seek past end of section", off))
+		c.fail(build.ErrPastSectionEnd)
 		return
 	}
 	c.wr.Reset(c.wr.ReaderAt(), nil, off)
@@ -56,7 +56,7 @@ func (c *cursor) skip(n uint64) {
 		return
 	}
 	if n > uint64(c.end-c.pos()) {
-		c.fail(makeFormatErr(uint64(c.pos()), "skip past end of section", n))
+		c.fail(build.ErrPastSectionEnd)
 		return
 	}
 	c.seek(c.pos() + int64(n))
@@ -67,7 +67,7 @@ func (c *cursor) u8() uint8 {
 		return 0
 	}
 	if c.pos() >= c.end {
-		c.fail(makeFormatErr(uint64(c.pos()), "read past end of section", 1))
+		c.fail(build.ErrPastSectionEnd)
 		return 0
 	}
 	b, err := c.wr.ReadByte()
@@ -85,7 +85,6 @@ func (c *cursor) u8() uint8 {
 // [DecodeULEB128].
 func (c *cursor) uleb(bits int) uint64 {
 	maxBytes := (bits + 6) / 7
-	start := c.pos()
 	var v uint64
 	var shift uint
 	for n := 1; ; n++ {
@@ -95,11 +94,11 @@ func (c *cursor) uleb(bits int) uint64 {
 		}
 		if n == maxBytes {
 			if b&0x80 != 0 {
-				c.fail(makeFormatErr(uint64(start), errLEBTooLong.Error(), bits))
+				c.fail(build.ErrLEBTooLong)
 				return 0
 			}
 			if rem := bits - int(shift); rem < 7 && b>>rem != 0 {
-				c.fail(makeFormatErr(uint64(start), errLEBOverflow.Error(), bits))
+				c.fail(build.ErrLEBOverflow)
 				return 0
 			}
 		}
@@ -117,7 +116,6 @@ func (c *cursor) u32() uint32 { return uint32(c.uleb(32)) }
 // [DecodeSLEB128].
 func (c *cursor) sleb(bits int) int64 {
 	maxBytes := (bits + 6) / 7
-	start := c.pos()
 	var v int64
 	var shift uint
 	for n := 1; ; n++ {
@@ -127,12 +125,12 @@ func (c *cursor) sleb(bits int) int64 {
 		}
 		if n == maxBytes {
 			if b&0x80 != 0 {
-				c.fail(makeFormatErr(uint64(start), errLEBTooLong.Error(), bits))
+				c.fail(build.ErrLEBTooLong)
 				return 0
 			}
 			rem := bits - int(shift)
 			if top := (b & 0x7f) >> (rem - 1); top != 0 && top != 0x7f>>(rem-1) {
-				c.fail(makeFormatErr(uint64(start), errLEBOverflow.Error(), bits))
+				c.fail(build.ErrLEBOverflow)
 				return 0
 			}
 		}
@@ -147,29 +145,6 @@ func (c *cursor) sleb(bits int) int64 {
 	}
 }
 
-// view returns the next n bytes as a subslice of the window, valid until the
-// cursor next moves. A span longer than the window fails with a
-// [BufferTooSmallError] naming the size that would have held it.
-func (c *cursor) view(n uint64) []byte {
-	if c.err != nil {
-		return nil
-	}
-	if n > uint64(c.end-c.pos()) {
-		c.fail(makeFormatErr(uint64(c.pos()), "read past end of section", n))
-		return nil
-	}
-	if n > uint64(c.bufLen) {
-		c.fail(BufferTooSmallError{Need: int(n), Have: c.bufLen})
-		return nil
-	}
-	b, err := c.wr.ReadView(int(n))
-	if err != nil {
-		c.fail(err)
-		return nil
-	}
-	return b
-}
-
 // vecLen reads a vector's element count and rejects one that cannot fit in the
 // rest of the section when every element takes at least minElem bytes. Counts
 // come straight from the file, so this is what stops a loop over a forged count
@@ -177,7 +152,7 @@ func (c *cursor) view(n uint64) []byte {
 func (c *cursor) vecLen(minElem uint64) uint32 {
 	n := c.u32()
 	if c.err == nil && uint64(n)*minElem > uint64(c.end-c.pos()) {
-		c.fail(makeFormatErr(uint64(c.pos()), "vector count exceeds section", n))
+		c.fail(build.ErrCountExceedsSection)
 		return 0
 	}
 	return n
@@ -194,7 +169,7 @@ func (c *cursor) skipName() {
 func (c *cursor) limits() {
 	flags := c.u8()
 	if c.err == nil && flags > 7 {
-		c.fail(makeFormatErr(uint64(c.pos()-1), "invalid limits flags", flags))
+		c.fail(build.ErrBadLimits)
 		return
 	}
 	bits := 32

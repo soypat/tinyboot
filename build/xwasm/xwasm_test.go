@@ -3,7 +3,6 @@ package xwasm
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/soypat/tinyboot/build"
 )
 
 // fixtures is the single TinyGo module the tests read: small, but with a host
@@ -62,8 +63,8 @@ func TestRead_sectionNames(t *testing.T) {
 			t.Fatalf("SectionByName(%q).Name() = %q, %v", name, got, err)
 		}
 	}
-	if _, err := f.SectionByName(".debug_nonexistent"); !errors.Is(err, errNoSection) {
-		t.Fatalf("want errNoSection, got %v", err)
+	if _, err := f.SectionByName(".debug_nonexistent"); err != build.ErrSectionNotFound {
+		t.Fatalf("want ErrSectionNotFound, got %v", err)
 	}
 	code, _ := f.SectionByID(SecCode)
 	if s, _ := f.SectionByName("code"); s != code {
@@ -87,6 +88,24 @@ func TestAppendData(t *testing.T) {
 	}
 }
 
+// readNames collects one of nr's name maps, reading each name into a buffer
+// sized by its entry.
+func readNames(t testing.TB, nr *NameReader, walk func(func(NameEntry) bool)) map[uint32]string {
+	t.Helper()
+	names := make(map[uint32]string)
+	for e := range walk {
+		name := make([]byte, e.Len)
+		if _, err := nr.ReadName(name, e); err != nil {
+			t.Fatal(err)
+		}
+		names[e.Index] = string(name)
+	}
+	if err := nr.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
 // funcNames walks f's functions and joins them with their names.
 func funcNames(t testing.TB, f *File) (funcs []Func, names map[uint32]string) {
 	t.Helper()
@@ -98,13 +117,7 @@ func funcNames(t testing.TB, f *File) (funcs []Func, names map[uint32]string) {
 	if err := nr.Reset(f, make([]byte, 256)); err != nil {
 		t.Fatal(err)
 	}
-	names = make(map[uint32]string)
-	for idx, name := range nr.FuncNames {
-		names[idx] = string(name)
-	}
-	if err := nr.Err(); err != nil {
-		t.Fatal(err)
-	}
+	names = readNames(t, &nr, nr.FuncNames)
 	for fn := range cr.Funcs {
 		funcs = append(funcs, fn)
 	}
@@ -199,28 +212,30 @@ func llvmTool(t *testing.T, name string) string {
 	return p
 }
 
-func TestNameReader_bufferTooSmall(t *testing.T) {
+// TestNameReader_shortBuffer checks names are independent of the walk's
+// window: a window holding no more than a section's framing still walks every
+// name, and a name buffer one byte short of an entry's Len is refused.
+func TestNameReader_shortBuffer(t *testing.T) {
 	f, _ := readFixture(t, fixtures[0])
 	var nr NameReader
+	if err := nr.Reset(f, make([]byte, maxSectionFrame-1)); err != io.ErrShortBuffer {
+		t.Fatalf("window below a section frame: got %v", err)
+	}
 	if err := nr.Reset(f, make([]byte, maxSectionFrame)); err != nil {
 		t.Fatal(err)
 	}
-	for range nr.FuncNames {
+	names := readNames(t, &nr, nr.FuncNames)
+	if len(names) == 0 {
+		t.Fatal("no function names")
 	}
-	var small BufferTooSmallError
-	if !errors.As(nr.Err(), &small) || small.Need <= small.Have {
-		t.Fatalf("want BufferTooSmallError, got %v", nr.Err())
-	}
-	// Growing to what was asked for gets past that name.
-	if err := nr.Reset(f, make([]byte, small.Need)); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	for range nr.FuncNames {
-		n++
-	}
-	if n == 0 {
-		t.Fatal("no names after growing buffer")
+	for e := range nr.FuncNames {
+		if e.Len == 0 {
+			continue
+		}
+		if _, err := nr.ReadName(make([]byte, e.Len-1), e); err != io.ErrShortBuffer {
+			t.Fatalf("name of %d bytes into %d: got %v", e.Len, e.Len-1, err)
+		}
+		break
 	}
 }
 
@@ -364,13 +379,13 @@ func TestDecodeULEB128(t *testing.T) {
 		{[]byte{0x80, 0x01}, 32, 128, 2, nil},
 		{[]byte{0xff, 0xff, 0xff, 0xff, 0x0f}, 32, 1<<32 - 1, 5, nil},
 		{[]byte{0x80, 0x80, 0x80, 0x80, 0x00}, 32, 0, 5, nil}, // Padded zero is legal.
-		{[]byte{0xff, 0xff, 0xff, 0xff, 0x1f}, 32, 0, 5, errLEBOverflow},
-		{[]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x00}, 32, 0, 5, errLEBOverflow},
+		{[]byte{0xff, 0xff, 0xff, 0xff, 0x1f}, 32, 0, 5, build.ErrLEBOverflow},
+		{[]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x00}, 32, 0, 5, build.ErrLEBOverflow},
 		{[]byte{0x80}, 32, 0, 1, io.ErrUnexpectedEOF},
 		{[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01}, 64, 1<<64 - 1, 10, nil},
-		{[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02}, 64, 0, 10, errLEBOverflow},
+		{[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02}, 64, 0, 10, build.ErrLEBOverflow},
 		{[]byte{0x7f}, 7, 127, 1, nil},
-		{[]byte{0x80, 0x00}, 7, 0, 1, errLEBTooLong},
+		{[]byte{0x80, 0x00}, 7, 0, 1, build.ErrLEBTooLong},
 	} {
 		v, n, err := DecodeULEB128(tc.b, tc.bits)
 		if v != tc.v || n != tc.n || err != tc.err {
@@ -401,15 +416,15 @@ func TestDecodeSLEB128(t *testing.T) {
 		{[]byte{0x80, 0x7f}, 32, -128, 2, nil},
 		{[]byte{0xff, 0xff, 0xff, 0xff, 0x07}, 32, 1<<31 - 1, 5, nil},
 		{[]byte{0x80, 0x80, 0x80, 0x80, 0x78}, 32, -1 << 31, 5, nil},
-		{[]byte{0xff, 0xff, 0xff, 0xff, 0x0f}, 32, 0, 5, errLEBOverflow}, // 2^32-1 as s32.
-		{[]byte{0x80, 0x80, 0x80, 0x80, 0x70}, 32, 0, 5, errLEBOverflow},
-		{[]byte{0x80, 0x80, 0x80, 0x80, 0x80}, 32, 0, 5, errLEBTooLong},
+		{[]byte{0xff, 0xff, 0xff, 0xff, 0x0f}, 32, 0, 5, build.ErrLEBOverflow}, // 2^32-1 as s32.
+		{[]byte{0x80, 0x80, 0x80, 0x80, 0x70}, 32, 0, 5, build.ErrLEBOverflow},
+		{[]byte{0x80, 0x80, 0x80, 0x80, 0x80}, 32, 0, 5, build.ErrLEBTooLong},
 		{[]byte{0x80, 0x80, 0x80, 0x80, 0x70}, 33, -1 << 32, 5, nil},
 		{[]byte{0x80, 0x80, 0x80, 0x80, 0x7f}, 33, -1 << 28, 5, nil},
-		{[]byte{0x80, 0x80, 0x80, 0x80, 0x60}, 33, 0, 5, errLEBOverflow},
+		{[]byte{0x80, 0x80, 0x80, 0x80, 0x60}, 33, 0, 5, build.ErrLEBOverflow},
 		{[]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f}, 64, -1 << 63, 10, nil},
 		{[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00}, 64, 1<<63 - 1, 10, nil},
-		{[]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01}, 64, 0, 10, errLEBOverflow},
+		{[]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01}, 64, 0, 10, build.ErrLEBOverflow},
 		{[]byte{0xc0}, 32, 0, 1, io.ErrUnexpectedEOF},
 	} {
 		v, n, err := DecodeSLEB128(tc.b, tc.bits)
@@ -436,13 +451,7 @@ func TestDataSegments(t *testing.T) {
 		if err := nr.Reset(f, make([]byte, 256)); err != nil {
 			t.Fatal(err)
 		}
-		names := make(map[uint32]string)
-		for idx, n := range nr.DataNames {
-			names[idx] = string(n)
-		}
-		if nr.Err() != nil {
-			t.Fatal(nr.Err())
-		}
+		names := readNames(t, &nr, nr.DataNames)
 		sec, _ := f.SectionByID(SecData)
 		sh := sec.SectionHeader()
 		_, countLen, _ := DecodeULEB128(data[sh.Offset:], 32)

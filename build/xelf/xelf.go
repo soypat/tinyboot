@@ -2,10 +2,10 @@ package xelf
 
 import (
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"io"
 	"math"
+
+	"github.com/soypat/tinyboot/build"
 )
 
 // Indexes into the Header.Ident array.
@@ -115,14 +115,6 @@ const (
 	offSymSize64  = 16
 )
 
-var (
-	errCompressionUnsupported = errors.New("compression type unsupported")
-	errBadClass               = errors.New("invalid/unsupported ELF class")
-	errReadFromNobits         = errors.New("unexpected read from SHT_NOBITS section")
-	errNoSymbols              = errors.New("no symbol section")
-	errSectionAliasDup        = errors.New("section aliases with more than a single prog")
-)
-
 type Header struct {
 	Class      Class
 	Data       Data
@@ -156,22 +148,20 @@ func (h Header) ByteOrder() (bo binary.ByteOrder) {
 	return bo
 }
 
-func (h Header) Validate() (err error) {
+func (h Header) Validate() error {
 	if h.Class != Class32 && h.Class != Class64 {
-		return makeFormatErr(offClass, "invalid class", h.Class)
+		return build.ErrBadClass
 	}
-	err = h.Data.Validate()
-	if h.Shoff > math.MaxInt64 {
-		err = errors.Join(err, makeFormatErr(0, "shoff overflows int64", h.Shoff))
+	if err := h.Data.Validate(); err != nil {
+		return err
 	}
-	if h.Phoff > math.MaxInt64 {
-		err = errors.Join(err, makeFormatErr(0, "phoff overflows int64", h.Phoff))
-	}
-	if h.Shoff == 0 && h.Shnum != 0 {
-		err = errors.Join(err, makeFormatErr(0, "invalid shnum for shoff=0", h.Shnum))
-	}
-	if h.Shnum > 0 && h.Shstrndx >= h.Shnum {
-		err = errors.Join(err, makeFormatErr(0, "invalid shstrndx", h.Shstrndx))
+	switch {
+	case h.Shoff > math.MaxInt64 || h.Phoff > math.MaxInt64:
+		return build.ErrHeaderOffsetOverflow
+	case h.Shoff == 0 && h.Shnum != 0:
+		return build.ErrShnumWithoutTable
+	case h.Shnum > 0 && h.Shstrndx >= h.Shnum:
+		return build.ErrBadShstrndx
 	}
 	var wantPhentSize, wantShentSize uint16
 	switch h.Class {
@@ -183,30 +173,27 @@ func (h Header) Validate() (err error) {
 		wantShentSize = sectionHeaderSize64
 	}
 	if h.Phnum > 0 && h.Phentsize < wantPhentSize {
-		err = errors.Join(err, makeFormatErr(0, "invalid phentsize", h.Phentsize))
+		return build.ErrPhentsizeTooSmall
+	} else if h.Shnum > 0 && h.Shentsize < wantShentSize {
+		return build.ErrShentsizeTooSmall
 	}
-	if h.Shnum > 0 && h.Shentsize < wantShentSize {
-		err = errors.Join(err, makeFormatErr(0, "invalid shentsize", h.Phentsize))
-	}
-	if h.Class == Class32 {
-		// TODO: add 32bit overflows.
-	}
-	return err
+	// TODO: add 32bit overflows.
+	return nil
 }
 
 func DecodeHeader(buf []byte) (header Header, n int, err error) {
 	if len(buf) < headerSize32 {
-		return Header{}, 0, errors.New("too short buffer to decode ELF header")
+		return Header{}, 0, io.ErrShortBuffer
 	}
 	if magicLE != binary.LittleEndian.Uint32(buf[0:]) {
-		return Header{}, 0, makeFormatErr(0, "bad magic number", buf[0:4])
+		return Header{}, 0, build.ErrBadMagic
 	}
 
 	header.Class = Class(buf[offClass])
 	if header.Class != Class32 && header.Class != Class64 {
-		return Header{}, 0, makeFormatErr(offClass, "unknown ELF class", header.Class)
+		return Header{}, 0, build.ErrBadClass
 	} else if header.Class == Class64 && len(buf) < headerSize64 {
-		return Header{}, 0, errors.New("too short buffer to decode Class64 ELF header")
+		return Header{}, 0, io.ErrShortBuffer
 	}
 
 	header.Data = Data(buf[offData])
@@ -217,7 +204,7 @@ func DecodeHeader(buf []byte) (header Header, n int, err error) {
 	bo := header.ByteOrder()
 	header.Version = Version(buf[offVersion])
 	if header.Version != VersionCurrent {
-		return Header{}, 0, makeFormatErr(offVersion, "unknown ELF version", header.Version)
+		return Header{}, 0, build.ErrBadVersion
 	}
 
 	header.OSABI = OSABI(buf[offOSABI])
@@ -227,7 +214,7 @@ func DecodeHeader(buf []byte) (header Header, n int, err error) {
 
 	version := bo.Uint32(buf[offVersionDup:])
 	if version != uint32(header.Version) {
-		return Header{}, 0, makeFormatErr(offVersionDup, "ELF IDENT version mismatch", header.Version)
+		return Header{}, 0, build.ErrVersionMismatch
 	}
 	// var phoff, shoff, fileOff int64
 	// var phentsize, phnum, shentsize, shnum, shstrndx int
@@ -259,14 +246,14 @@ func DecodeHeader(buf []byte) (header Header, n int, err error) {
 
 func (h Header) Put(b []byte) (n int, err error) {
 	if len(b) < headerSize32 || h.Class == Class64 && len(b) < headerSize64 {
-		return 0, errors.New("buffer too short to put Header")
+		return 0, io.ErrShortBuffer
 	}
 	// Perform only validation for knowledge on how to marshal data. User should call Validate beforehand.
 	err = h.Data.Validate()
 	if err != nil {
 		return 0, err
 	} else if h.Class != Class32 && h.Class != Class64 {
-		return 0, errBadClass
+		return 0, build.ErrBadClass
 	}
 
 	binary.LittleEndian.PutUint32(b, magicLE)
@@ -335,7 +322,7 @@ func DecodeProgHeader(b []byte, class Class, bo binary.ByteOrder) (ph ProgHeader
 	switch class {
 	case Class32:
 		if len(b) < progHeaderSize32 {
-			return ph, 0, errors.New("ProgHeader short decode buffer")
+			return ph, 0, io.ErrShortBuffer
 		}
 		ph.Type = ProgType(bo.Uint32(b[offPType32:]))
 		ph.Flags = ProgFlag(bo.Uint32(b[offPFlags32:]))
@@ -348,7 +335,7 @@ func DecodeProgHeader(b []byte, class Class, bo binary.ByteOrder) (ph ProgHeader
 		n = progHeaderSize32
 	case Class64:
 		if len(b) < progHeaderSize64 {
-			return ph, 0, errors.New("ProgHeader short decode buffer")
+			return ph, 0, io.ErrShortBuffer
 		}
 		ph.Type = ProgType(bo.Uint32(b[offPType64:]))
 		ph.Flags = ProgFlag(bo.Uint32(b[offPFlags64:]))
@@ -360,7 +347,7 @@ func DecodeProgHeader(b []byte, class Class, bo binary.ByteOrder) (ph ProgHeader
 		ph.Align = bo.Uint64(b[offPAlign64:])
 		n = progHeaderSize64
 	default:
-		return ph, 0, errBadClass
+		return ph, 0, build.ErrBadClass
 	}
 	return ph, n, nil
 }
@@ -369,7 +356,7 @@ func (ph ProgHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, err
 	switch class {
 	case Class32:
 		if len(b) < progHeaderSize32 {
-			return 0, errors.New("ProgHeader short put buffer")
+			return 0, io.ErrShortBuffer
 		}
 		bo.PutUint32(b[offPType32:], uint32(ph.Type))
 		bo.PutUint32(b[offPFlags32:], uint32(ph.Flags))
@@ -382,7 +369,7 @@ func (ph ProgHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, err
 		n = progHeaderSize32
 	case Class64:
 		if len(b) < progHeaderSize64 {
-			return 0, errors.New("ProgHeader short put buffer")
+			return 0, io.ErrShortBuffer
 		}
 		bo.PutUint32(b[offPType64:], uint32(ph.Type))
 		bo.PutUint32(b[offPFlags64:], uint32(ph.Flags))
@@ -394,7 +381,7 @@ func (ph ProgHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, err
 		bo.PutUint64(b[offPAlign64:], ph.Align)
 		n = progHeaderSize64
 	default:
-		return 0, errBadClass
+		return 0, build.ErrBadClass
 	}
 	return n, nil
 }
@@ -421,29 +408,16 @@ func (ph SectionHeader) HeaderSize(class Class) int {
 	}
 }
 
-func (ph ProgHeader) Validate(class Class) (err error) {
-	if ph.Off > math.MaxInt64 {
-		err = errors.Join(err, errors.New("program header offset overflows int64"))
+func (ph ProgHeader) Validate(class Class) error {
+	if ph.Off > math.MaxInt64 || ph.SizeOnFile > math.MaxInt64 {
+		return build.ErrProgOverflow
 	}
-	if ph.SizeOnFile > math.MaxInt64 {
-		err = errors.Join(err, errors.New("program header file size overflows int64"))
-	}
-	if class == Class32 {
-
-	}
-	return err
+	return nil
 }
 
 type prog struct {
 	ProgHeader
 	sr io.SectionReader
-}
-
-func makeFormatErr(off uint64, msg string, val any) error {
-	if str, ok := val.(fmt.Stringer); ok {
-		val = str.String()
-	}
-	return fmt.Errorf("ELF format error: %s @ off=%d: %v", msg, off, val)
 }
 
 type SectionFlag uint64
@@ -469,7 +443,7 @@ func DecodeSectionHeader(b []byte, class Class, bo binary.ByteOrder) (sh Section
 	switch class {
 	case Class32:
 		if len(b) < sectionHeaderSize32 {
-			return sh, 0, errors.New("SectionHeader short decode buffer")
+			return sh, 0, io.ErrShortBuffer
 		}
 		sh.Name = bo.Uint32(b[offSName32:])
 		sh.Type = SectionType(bo.Uint32(b[offSType32:]))
@@ -484,7 +458,7 @@ func DecodeSectionHeader(b []byte, class Class, bo binary.ByteOrder) (sh Section
 		n = sectionHeaderSize32
 	case Class64:
 		if len(b) < sectionHeaderSize64 {
-			return sh, 0, errors.New("SectionHeader short decode buffer")
+			return sh, 0, io.ErrShortBuffer
 		}
 		sh.Name = bo.Uint32(b[offSName64:])
 		sh.Type = SectionType(bo.Uint32(b[offSType64:]))
@@ -498,7 +472,7 @@ func DecodeSectionHeader(b []byte, class Class, bo binary.ByteOrder) (sh Section
 		sh.Entsize = bo.Uint64(b[offSEntsize64:])
 		n = sectionHeaderSize64
 	default:
-		return sh, 0, errBadClass
+		return sh, 0, build.ErrBadClass
 	}
 	return sh, n, nil
 }
@@ -507,7 +481,7 @@ func (sh SectionHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, 
 	switch class {
 	case Class32:
 		if len(b) < sectionHeaderSize32 {
-			return 0, errors.New("SectionHeader short put buffer")
+			return 0, io.ErrShortBuffer
 		}
 		bo.PutUint32(b[offSName32:], sh.Name)                   // sh.Name
 		bo.PutUint32(b[offSType32:], uint32(sh.Type))           // sh.Type
@@ -522,7 +496,7 @@ func (sh SectionHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, 
 		n = sectionHeaderSize32
 	case Class64:
 		if len(b) < sectionHeaderSize64 {
-			return 0, errors.New("SectionHeader short put buffer")
+			return 0, io.ErrShortBuffer
 		}
 		bo.PutUint32(b[offSName64:], sh.Name)           // sh.Name
 		bo.PutUint32(b[offSType64:], uint32(sh.Type))   // sh.Type
@@ -536,39 +510,21 @@ func (sh SectionHeader) Put(b []byte, class Class, bo binary.ByteOrder) (n int, 
 		bo.PutUint64(b[offSEntsize64:], sh.Entsize)     // sh.Entsize
 		n = sectionHeaderSize64
 	default:
-		return 0, errBadClass
+		return 0, build.ErrBadClass
 	}
 	return n, nil
 }
 
-func (sh SectionHeader) Validate(class Class) (err error) {
-	if sh.Offset > math.MaxInt64 {
-		err = errors.New("section header offset overflows int64")
+func (sh SectionHeader) Validate(class Class) error {
+	if sh.Offset > math.MaxInt64 || sh.SizeOnFile > math.MaxInt64 {
+		return build.ErrSectionOverflow
 	}
-	if sh.SizeOnFile > math.MaxInt64 {
-		err = errors.Join(err, errors.New("section header size overflows int64"))
+	if class == Class32 && (sh.Offset > math.MaxUint32 || sh.Addr > math.MaxUint32 ||
+		sh.SizeOnFile > math.MaxUint32 || sh.Addralign > math.MaxUint32 ||
+		sh.Entsize > math.MaxUint32 || sh.Flags > math.MaxUint32) {
+		return build.ErrClass32Overflow
 	}
-	if class == Class32 {
-		if sh.Offset > math.MaxUint32 {
-			err = errors.Join(err, errors.New("section header offset overflows (Class32)"))
-		}
-		if sh.Addr > math.MaxUint32 {
-			err = errors.Join(err, errors.New("section header addr overflow (Class32)"))
-		}
-		if sh.SizeOnFile > math.MaxUint32 {
-			err = errors.Join(err, errors.New("section header file size overflow (Class32)"))
-		}
-		if sh.Addralign > math.MaxUint32 {
-			err = errors.Join(err, errors.New("section header addralign overflow (Class32)"))
-		}
-		if sh.Entsize > math.MaxUint32 {
-			err = errors.Join(err, errors.New("section header entsize overflow (Class32)"))
-		}
-		if sh.Flags > math.MaxUint32 {
-			err = errors.Join(err, errors.New("section header flags overflow (Class32)"))
-		}
-	}
-	return err
+	return nil
 }
 
 type section struct {
@@ -628,7 +584,7 @@ func DecodeSym(b []byte, class Class, bo binary.ByteOrder) (sym Sym, n int, err 
 		n = symSize64
 
 	default:
-		return Sym{}, 0, errBadClass
+		return Sym{}, 0, build.ErrBadClass
 	}
 	return sym, n, nil
 }
@@ -649,7 +605,7 @@ func DecodeRel(b []byte, class Class, bo binary.ByteOrder) (rel Rel, n int, err 
 		rel.Info = bo.Uint64(b[8:])
 		n = 16
 	default:
-		return Rel{}, 0, errBadClass
+		return Rel{}, 0, build.ErrBadClass
 	}
 	return rel, n, nil
 }

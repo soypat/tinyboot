@@ -18,9 +18,10 @@ package xwasm
 
 import (
 	"encoding/binary"
-	"errors"
-	"fmt"
+	"io"
 	"strconv"
+
+	"github.com/soypat/tinyboot/build"
 )
 
 const (
@@ -38,15 +39,6 @@ const (
 	// size; real modules carry a dozen standard sections and a handful of
 	// custom ones. This mirrors xelf's safechunk guard.
 	maxSections = 1 << 12
-)
-
-var (
-	errBadMagic       = errors.New("bad magic number")
-	errNoSection      = errors.New("section not found")
-	errLEBTooLong     = errors.New("LEB128 encoding exceeds maximum length")
-	errLEBOverflow    = errors.New("LEB128 value overflows its type")
-	errTooManySecs    = errors.New("too many sections")
-	errSectionPastEOF = errors.New("section extends past end of file")
 )
 
 // SectionID identifies the kind of a section. Every id but [SecCustom] may
@@ -116,7 +108,7 @@ func (id SectionID) String() string {
 // Validate reports whether id is a section id this package knows.
 func (id SectionID) Validate() error {
 	if int(id) >= len(sectionNames) {
-		return makeFormatErr(0, "unknown section id", uint8(id))
+		return build.ErrUnknownSectionID
 	}
 	return nil
 }
@@ -130,14 +122,14 @@ type Header struct {
 // DecodeHeader decodes the module preamble at the start of buf.
 func DecodeHeader(buf []byte) (h Header, n int, err error) {
 	if len(buf) < headerSize {
-		return Header{}, 0, errors.New("too short buffer to decode WASM header")
+		return Header{}, 0, io.ErrShortBuffer
 	}
 	if binary.LittleEndian.Uint32(buf) != magic {
-		return Header{}, 0, makeFormatErr(0, errBadMagic.Error(), buf[:4])
+		return Header{}, 0, build.ErrBadMagic
 	}
 	h.Version = binary.LittleEndian.Uint32(buf[4:])
 	if h.Version != 1 {
-		return Header{}, 0, makeFormatErr(4, "unsupported WASM version", h.Version)
+		return Header{}, 0, build.ErrBadVersion
 	}
 	return h, headerSize, nil
 }
@@ -145,7 +137,7 @@ func DecodeHeader(buf []byte) (h Header, n int, err error) {
 // Put encodes the module preamble into b.
 func (h Header) Put(b []byte) (n int, err error) {
 	if len(b) < headerSize {
-		return 0, errors.New("buffer too short to put Header")
+		return 0, io.ErrShortBuffer
 	}
 	binary.LittleEndian.PutUint32(b, magic)
 	binary.LittleEndian.PutUint32(b[4:], h.Version)
@@ -186,15 +178,15 @@ func (sh SectionHeader) FrameSize() uint64 { return sh.Offset - sh.Start }
 // which excludes a custom section's name: the name need not be in b.
 func DecodeSectionHeader(b []byte, start uint64) (sh SectionHeader, n int, err error) {
 	if len(b) == 0 {
-		return sh, 0, errors.New("SectionHeader short decode buffer")
+		return sh, 0, io.ErrShortBuffer
 	}
 	sh.ID = SectionID(b[0])
 	if err = sh.ID.Validate(); err != nil {
-		return sh, 0, makeFormatErr(start, "unknown section id", b[0])
+		return sh, 0, err
 	}
 	size, k, err := DecodeULEB128(b[1:], 32)
 	if err != nil {
-		return sh, 0, makeFormatErr(start+1, "section size", err)
+		return sh, 0, err
 	}
 	n = 1 + k
 	sh.Start = start
@@ -205,35 +197,15 @@ func DecodeSectionHeader(b []byte, start uint64) (sh SectionHeader, n int, err e
 	}
 	namelen, k, err := DecodeULEB128(b[n:], 32)
 	if err != nil {
-		return sh, 0, makeFormatErr(start+uint64(n), "custom section name length", err)
+		return sh, 0, err
 	}
 	// The name is part of the payload the size counts.
 	if uint64(k)+namelen > size {
-		return sh, 0, makeFormatErr(start+uint64(n), "custom section name exceeds section", namelen)
+		return sh, 0, build.ErrBadSectionName
 	}
 	sh.NameOff = sh.Offset + uint64(k)
 	sh.NameLen = uint32(namelen)
 	sh.Offset = sh.NameOff + namelen
 	sh.Size = size - uint64(k) - namelen
 	return sh, n + k, nil
-}
-
-// BufferTooSmallError reports a caller-owned buffer that cannot hold a single
-// item the reader must present whole, and how large it would have to be. A
-// caller can grow its buffer to Need and retry.
-type BufferTooSmallError struct {
-	Need int
-	Have int
-}
-
-func (e BufferTooSmallError) Error() string {
-	return "xwasm: buffer of " + strconv.Itoa(e.Have) +
-		" bytes too small, need " + strconv.Itoa(e.Need)
-}
-
-func makeFormatErr(off uint64, msg string, val any) error {
-	if str, ok := val.(fmt.Stringer); ok {
-		val = str.String()
-	}
-	return fmt.Errorf("WASM format error: %s @ off=%d: %v", msg, off, val)
 }

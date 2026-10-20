@@ -21,7 +21,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/soypat/tinyboot/build/xelf"
+	"github.com/soypat/tinyboot/build/xobj"
 )
 
 type Flags struct {
@@ -105,27 +105,37 @@ func profileFile(path string, flags Flags) ([]Entry, error) {
 	return profileReader(fp, info.Size(), flags)
 }
 
+// profileReader profiles the ELF binary or WebAssembly module in r.
 func profileReader(r io.ReaderAt, size int64, flags Flags) ([]Entry, error) {
-	if isWasm(r) {
-		return profileWasm(r, size, flags)
-	}
-	var f xelf.File
+	f := new(xobj.File)
 	if err := f.Read(r); err != nil {
 		return nil, err
 	}
+	if f.Format() == xobj.FormatWasm {
+		// A module has no segments and no load addresses: its code runs from
+		// the Code section and its linear memory is sized at run time. The
+		// segment kind and memory mode have no counterpart, and report so
+		// rather than guess.
+		if flags.mem {
+			return nil, errors.New("-mem is not supported for WebAssembly: linear memory is sized at run time")
+		} else if flags.kind == KindSegment {
+			return nil, fmt.Errorf("granularity %q does not apply to WebAssembly", flags.kind)
+		}
+	}
 	switch flags.kind {
 	case KindSegment:
-		return profileSegments(&f, flags.mem)
+		ef, _ := f.ELF()
+		return profileSegments(ef, flags.mem)
 	case KindSection:
-		return profileSections(&f, size, flags.mem)
+		return profileSections(f, size, flags.mem)
 	case KindSymbol:
-		return profileSymbols(&f, flags.mem)
+		return profileSymbols(f, flags.mem)
 	case KindPackage:
-		return profilePackages(&f, flags.mem)
+		return profilePackages(f, flags.mem)
 	case KindFile:
-		return profileSource(&f, flags.mem, false)
+		return profileSource(f, flags.mem, false)
 	case KindLine:
-		return profileSource(&f, flags.mem, true)
+		return profileSource(f, flags.mem, true)
 	default:
 		return nil, fmt.Errorf("granularity %q is not implemented yet", flags.kind)
 	}

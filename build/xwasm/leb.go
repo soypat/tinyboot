@@ -1,6 +1,10 @@
 package xwasm
 
-import "io"
+import (
+	"io"
+
+	"github.com/soypat/tinyboot/build"
+)
 
 // DecodeULEB128 decodes an unsigned LEB128 value of at most bits bits (1 to
 // 64), returning the value and the number of bytes consumed.
@@ -17,7 +21,7 @@ func DecodeULEB128(b []byte, bits int) (v uint64, n int, err error) {
 		n++
 		if n == maxBytes {
 			if rem := bits - int(shift); rem < 7 && c>>rem != 0 {
-				return 0, n, errLEBOverflow // Also catches a continuation bit.
+				return 0, n, build.ErrLEBOverflow // Also catches a continuation bit.
 			}
 		}
 		v |= uint64(c&0x7f) << shift
@@ -25,7 +29,7 @@ func DecodeULEB128(b []byte, bits int) (v uint64, n int, err error) {
 			return v, n, nil
 		}
 		if n == maxBytes {
-			return 0, n, errLEBTooLong
+			return 0, n, build.ErrLEBTooLong
 		}
 		shift += 7
 	}
@@ -43,14 +47,14 @@ func DecodeSLEB128(b []byte, bits int) (v int64, n int, err error) {
 		n++
 		if n == maxBytes {
 			if c&0x80 != 0 {
-				return 0, n, errLEBTooLong
+				return 0, n, build.ErrLEBTooLong
 			}
 			// The payload's sign bit and every payload bit above the type's
 			// width must agree: all clear or all set.
 			rem := bits - int(shift)
 			top := (c & 0x7f) >> (rem - 1)
 			if top != 0 && top != 0x7f>>(rem-1) {
-				return 0, n, errLEBOverflow
+				return 0, n, build.ErrLEBOverflow
 			}
 		}
 		v |= int64(c&0x7f) << shift
@@ -62,7 +66,7 @@ func DecodeSLEB128(b []byte, bits int) (v int64, n int, err error) {
 			return v, n, nil
 		}
 		if n == maxBytes {
-			return 0, n, errLEBTooLong
+			return 0, n, build.ErrLEBTooLong
 		}
 	}
 	return 0, n, io.ErrUnexpectedEOF
