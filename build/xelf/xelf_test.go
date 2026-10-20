@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/soypat/tinyboot/build"
 )
 
 func TestFile_pca10040_ROM(t *testing.T) {
@@ -126,7 +128,7 @@ func testFile(t *testing.T, r io.ReaderAt, wantSecs int) *File {
 			continue
 		}
 		pidx, err := sec.OfProg()
-		if err != nil && err != errSectionAliasDup {
+		if err != nil && err != build.ErrSegmentAmbiguous {
 			// Sections may alias several progs, ignore those cases.
 			t.Errorf("OfProg for %s failed: %s", sec, err)
 			continue

@@ -1,5 +1,7 @@
 package xelf
 
+import "github.com/soypat/tinyboot/build"
+
 // Version is found in Header.Ident[EI_VERSION] and Header.Version.
 //
 //go:generate stringer -linecomment -output=stringers.go -type=Class,SectionType,Data,OSABI,Type,Machine,SectionIndex,ProgType,sectionFlag,progFlag,NType,dynFlag1,SymVis,SymBind,SymType,RX86_64,RAARCH64,RAlpha,RARM,R386,R390,RMIPS,RLoongArch,RPPC,RPPC64,RRISCV,RSPARC
@@ -30,7 +32,7 @@ const (
 
 func (d Data) Validate() error {
 	if d != Data2LSB && d != Data2MSB {
-		return makeFormatErr(offData, "unknown data encoding", d)
+		return build.ErrBadDataEncoding
 	}
 	return nil
 }

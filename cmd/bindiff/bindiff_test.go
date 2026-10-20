@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/soypat/tinyboot/build/xelf"
+	"github.com/soypat/tinyboot/build/xobj"
 )
 
 var fixtures = []string{
@@ -91,6 +91,10 @@ func TestPackageOf(t *testing.T) {
 		{"SystemInit", cPackage},
 		// The remainder bucket passes through so rollups still reconcile.
 		{Unattributed, Unattributed},
+		// Placeholders for unnamed WebAssembly items roll up by kind; their
+		// bracket must not read as the start of a spelled-out type.
+		{"[data 12]", "[data]"},
+		{"[func 7]", "[func]"},
 	} {
 		if got := packageOf(tc.sym); got != tc.want {
 			t.Errorf("packageOf(%q)=%q want %q", tc.sym, got, tc.want)
@@ -124,7 +128,7 @@ func TestSymbolProfileReconciles(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer fp.Close()
-			var f xelf.File
+			var f xobj.File
 			if err := f.Read(fp); err != nil {
 				t.Fatal(err)
 			}
@@ -140,13 +144,9 @@ func TestSymbolProfileReconciles(t *testing.T) {
 				}
 				bySection[e.Section] += e.New
 			}
-			for i := 0; i < f.NumSections(); i++ {
-				s, err := f.Section(i)
-				if err != nil {
-					t.Fatal(err)
-				}
-				sh := s.SectionHeader()
-				secName, err := s.Name()
+			var names nameBuf
+			for s := range f.Sections {
+				secName, err := names.section(&f, s.Index)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -154,13 +154,12 @@ func TestSymbolProfileReconciles(t *testing.T) {
 				if !ok {
 					continue // No symbols land here and it holds no file bytes.
 				}
-				want := int64(sh.SizeOnFile)
-				if sh.Type == xelf.SecTypeNobits {
-					want = 0
+				if got != int64(s.Size) {
+					t.Errorf("section %q: symbols total %d, section is %d bytes", secName, got, s.Size)
 				}
-				if got != want {
-					t.Errorf("section %q: symbols total %d, section is %d bytes", secName, got, want)
-				}
+			}
+			if err := f.Err(); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

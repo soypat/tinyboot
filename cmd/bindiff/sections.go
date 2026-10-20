@@ -4,13 +4,12 @@ import (
 	"fmt"
 
 	"github.com/soypat/tinyboot/build/xelf"
+	"github.com/soypat/tinyboot/build/xobj"
 )
 
-// xelf keeps its section and prog flag constants unexported, so the values this
-// package needs are restated here.
+// xelf keeps its prog flag constants unexported, so the values this package
+// needs are restated here.
 const (
-	secFlagAlloc xelf.SectionFlag = 0x2 // SHF_ALLOC: occupies memory at run time.
-
 	progFlagX xelf.ProgFlag = 0x1 // PF_X
 	progFlagW xelf.ProgFlag = 0x2 // PF_W
 	progFlagR xelf.ProgFlag = 0x4 // PF_R
@@ -31,69 +30,55 @@ func progPerms(f xelf.ProgFlag) string {
 	return string(perms)
 }
 
-// profileSections attributes bytes to ELF sections.
+// profileSections attributes bytes to sections.
 //
 // In file mode the entries sum exactly to the size of the file: sections that
-// occupy no file bytes (SHT_NOBITS, i.e. .bss) contribute zero, and the ELF
-// header, program header table, section header table and any inter-section
-// padding are accounted for explicitly. In memory mode only allocated sections
-// count, and .bss contributes its run-time size.
-func profileSections(f *xelf.File, fileSize int64, mem bool) ([]Entry, error) {
-	hdr := f.Header()
-	nsect := f.NumSections()
-	entries := make([]Entry, 0, nsect+2)
+// occupy no file bytes (SHT_NOBITS, i.e. .bss) contribute zero, and the
+// format's structure -- ELF's header and header tables, a WebAssembly module's
+// preamble and section framing -- is collected under [elf-headers] or
+// [wasm-headers]. Whatever is left is padding between sections, or bytes no
+// section claims. In memory mode only loaded sections count, and .bss
+// contributes its run-time size.
+func profileSections(f *xobj.File, fileSize int64, mem bool) ([]Entry, error) {
+	entries := make([]Entry, 0, f.NumSections()+2)
 
 	// covered tracks file bytes claimed by something, to derive the remainder.
 	covered := int64(0)
-	var name []byte
-	for i := 0; i < nsect; i++ {
-		s, err := f.Section(i)
-		if err != nil {
-			return nil, fmt.Errorf("section %d: %w", i, err)
-		}
-		sh := s.SectionHeader()
-		if sh.Type == xelf.SecTypeNull {
-			continue
-		}
-		name, err = s.AppendName(name[:0])
-		if err != nil {
-			return nil, fmt.Errorf("section %d name: %w", i, err)
-		}
-
+	var names nameBuf
+	for s := range f.Sections {
 		var size int64
 		if mem {
-			if sh.Flags&secFlagAlloc == 0 {
+			if !s.Loaded {
 				continue // Not resident: debug info, symbol tables, comments.
 			}
-			size = int64(sh.SizeOnFile) // sh_size is the memory size for NOBITS.
+			size = int64(s.MemSize)
 		} else {
-			if sh.Type == xelf.SecTypeNobits {
-				size = 0 // Occupies address space, not file bytes.
-			} else {
-				size = int64(sh.SizeOnFile)
-			}
+			size = int64(s.Size)
 			covered += size
+		}
+		name, err := names.section(f, s.Index)
+		if err != nil {
+			return nil, err
 		}
 		entries = append(entries, Entry{
 			Kind: KindSection,
-			Name: string(name),
-			Pos:  Pos{Addr: sh.Addr},
+			Name: name,
+			Pos:  Pos{Addr: s.Addr},
 			New:  size,
 		})
+	}
+	if err := f.Err(); err != nil {
+		return nil, err
 	}
 	if mem {
 		return entries, nil
 	}
 
-	// ELF structural overhead: the header itself plus the two header tables.
-	overhead := int64(hdr.HeaderSize()) +
-		int64(hdr.Phentsize)*int64(hdr.Phnum) +
-		int64(hdr.Shentsize)*int64(hdr.Shnum)
-	entries = append(entries, Entry{Kind: KindSection, Name: "[elf-headers]", New: overhead})
+	overhead := f.HeaderBytes()
+	entries = append(entries, Entry{Kind: KindSection, Name: "[" + f.Format().String() + "-headers]", New: overhead})
 	covered += overhead
 
-	// Whatever is left is alignment padding between sections, or bytes no
-	// section header claims. Reporting it keeps the total honest.
+	// Reporting the remainder keeps the total honest.
 	if rem := fileSize - covered; rem != 0 {
 		entries = append(entries, Entry{Kind: KindSection, Name: Unattributed, New: rem})
 	}

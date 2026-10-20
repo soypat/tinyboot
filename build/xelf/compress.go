@@ -2,6 +2,8 @@ package xelf
 
 import (
 	"io"
+
+	"github.com/soypat/tinyboot/build"
 )
 
 // Chdr sizes: an ELF32 header is 3 words, an ELF64 one is a word, a word of
@@ -42,7 +44,7 @@ func (fs FileSection) Compression() (ch CompressionHeader, compressed bool, err 
 		ch.Len = chdrSize64
 	}
 	if int64(s.SizeOnFile) < int64(ch.Len) {
-		return ch, true, makeFormatErr(s.Offset, "section too short for compression header", s.SizeOnFile)
+		return ch, true, build.ErrShortCompressionHeader
 	}
 	var buf [chdrSize64]byte
 	if _, err := fs.readAt(buf[:ch.Len], 0); err != nil {
@@ -60,7 +62,7 @@ func (fs FileSection) Compression() (ch CompressionHeader, compressed bool, err 
 		ch.Addralign = int64(bo.Uint32(buf[8:12]))
 	}
 	if ch.Size < 0 {
-		return ch, true, makeFormatErr(s.Offset, "compressed section size overflows", ch.Size)
+		return ch, true, build.ErrCompressedSizeOverflow
 	}
 	return ch, true, nil
 }
@@ -72,7 +74,7 @@ func (fs FileSection) Compression() (ch CompressionHeader, compressed bool, err 
 func (fs FileSection) OpenPayload() (*io.SectionReader, error) {
 	s := fs.ptr()
 	if s.Type == SecTypeNobits {
-		return nil, errReadFromNobits
+		return nil, build.ErrNoContents
 	}
 	ch, compressed, err := fs.Compression()
 	if err != nil {

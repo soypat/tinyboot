@@ -9,7 +9,7 @@ import (
 
 	"github.com/soypat/tinyboot/build/elfutil"
 	"github.com/soypat/tinyboot/build/xdwarf"
-	"github.com/soypat/tinyboot/build/xelf"
+	"github.com/soypat/tinyboot/build/xobj"
 )
 
 // srcRange is a half-open address range attributed to one source position.
@@ -72,13 +72,16 @@ func buildLineIndex(sec xdwarf.Sections, size int64, aux []byte) (*lineIndex, er
 		for r := range u.Rows {
 			flush(r.Address)
 			if r.EndSequence {
-				break
+				// A unit may hold many sequences -- LLVM's WebAssembly backend
+				// emits one per function -- so this ends a sequence, not the
+				// unit.
+				continue
 			}
 			nameBuf, err = u.AppendFileName(nameBuf[:0], r.File)
 			if err != nil {
 				// A row naming a file outside the table is not worth failing
-				// the whole binary over; it lands in the remainder instead.
-				break
+				// the whole binary over; its bytes land in the remainder.
+				continue
 			}
 			name := xdwarf.CleanPath(string(nameBuf))
 			canonical, ok := interned[name]
@@ -90,6 +93,9 @@ func buildLineIndex(sec xdwarf.Sections, size int64, aux []byte) (*lineIndex, er
 			havePending = true
 		}
 		flush(0) // A sequence that never ended contributes nothing.
+		if err := u.Err(); err != nil {
+			return nil, fmt.Errorf("line unit at %d: %w", off, err)
+		}
 		off = next
 	}
 	sort.Slice(idx.ranges, func(i, j int) bool {
@@ -124,15 +130,16 @@ const defaultAux = 4096
 //
 // Retrying means starting over rather than resuming: a compressed .debug_line
 // is inflated as it is walked and cannot be rewound, so both a larger aux and a
-// zlib reader the binary turned out to need require a fresh load.
-func loadLineIndex(f *xelf.File, rr *elfutil.DWARFReaders) (*lineIndex, error) {
+// zlib reader the binary turned out to need require a fresh load. A
+// WebAssembly module's DWARF is never compressed, and leaves rr untouched.
+func loadLineIndex(f *xobj.File, rr *elfutil.DWARFReaders) (*lineIndex, error) {
 	aux := make([]byte, defaultAux)
 	for {
 		// The lookback the streaming path needs is a function of aux, so the two
 		// grow together or the walk fails partway through.
 		rr.Stream = resize(rr.Stream, elfutil.StreamBufferFor(len(aux)))
 		var sec xdwarf.Sections
-		size, err := elfutil.LoadDWARF(&sec, rr, f)
+		size, err := f.LoadLines(&sec, rr)
 		if errors.Is(err, elfutil.ErrNoZlib) {
 			// The gc toolchain compresses DWARF by default, so this is the
 			// ordinary path for a binary that was not built with TinyGo. The
@@ -200,7 +207,7 @@ func (idx *lineIndex) visitOverlaps(start, end uint64, fn func(r srcRange, n int
 // result still reconciles against sections: a symbol's bytes are split among
 // the source ranges covering it, and whatever the line table does not cover --
 // data, padding, assembly with no line info -- stays in [unattributed].
-func profileSource(f *xelf.File, mem, byLine bool) ([]Entry, error) {
+func profileSource(f *xobj.File, mem, byLine bool) ([]Entry, error) {
 	t, err := tileSymbols(f, mem)
 	if err != nil {
 		return nil, err
@@ -210,7 +217,12 @@ func profileSource(f *xelf.File, mem, byLine bool) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return attributeSource(t, idx, byLine), nil
+}
 
+// attributeSource splits each placement's bytes among the source ranges that
+// cover it.
+func attributeSource(t tiling, idx *lineIndex, byLine bool) []Entry {
 	kind := KindFile
 	if byLine {
 		kind = KindLine
@@ -228,6 +240,12 @@ func profileSource(f *xelf.File, mem, byLine bool) ([]Entry, error) {
 
 	for _, p := range t.placements {
 		if p.size == 0 {
+			continue
+		}
+		if !p.inLines {
+			// Not in the line table's address space: its address would alias
+			// unrelated code.
+			unmapped[p.section] += p.size
 			continue
 		}
 		var covered int64
@@ -269,7 +287,7 @@ func profileSource(f *xelf.File, mem, byLine bool) ([]Entry, error) {
 			})
 		}
 	}
-	return entries, nil
+	return entries
 }
 
 func sourceName(file string, line uint32, byLine bool) string {

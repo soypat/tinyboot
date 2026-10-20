@@ -1,9 +1,6 @@
 package xelf
 
-import (
-	"errors"
-	"fmt"
-)
+import "github.com/soypat/tinyboot/build"
 
 // RelocError is returned by [ApplyRelocations] when a [Rel] or [Rela] is unable to be applied to
 // the target program.
@@ -43,9 +40,9 @@ func (fail RelocError) Error() (s string) {
 // ApplyRelocations applies relocations to dst. rels is a relocations section. syms is the symbol table.
 func ApplyRelocations(dst []byte, rels []byte, syms []Sym, hdr Header) (err error) {
 	if len(rels) == 0 {
-		return errors.New("empty relocation data")
+		return build.ErrNoRelocationData
 	} else if len(syms) == 0 {
-		return errors.New("no symbols for relocation")
+		return build.ErrNoRelocationSymbols
 	}
 	bo := hdr.ByteOrder()
 	var oob RelocError
@@ -119,7 +116,7 @@ func (f *File) appendSymbols(dst []Sym, typ SectionType) ([]Sym, error) {
 	class := f.hdr.Class
 	symtabSection, err := f.SectionByType(typ)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errNoSymbols, err)
+		return nil, build.ErrNoSymbols
 	}
 	symtabSh := symtabSection.SectionHeader()
 	data, err := symtabSection.AppendData(nil)
@@ -129,13 +126,13 @@ func (f *File) appendSymbols(dst []Sym, typ SectionType) ([]Sym, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to load symbol section: %w", err)
+		return nil, err
 	} else if len(data) == 0 {
-		return nil, errors.New("empty symbol section")
+		return nil, build.ErrEmptySymbolTable
 	} else if (class == Class32 && len(data)%symSize32 != 0) || (class == Class64 && len(data)%symSize64 != 0) {
-		return nil, errors.New("length of symbol section is not a multiple of SymSize")
+		return nil, build.ErrTableNotMultiple
 	} else if symtabSh.Entsize != uint64(symSize) {
-		return nil, makeFormatErr(symtabSh.Offset, "entsize not match symbol size", symtabSh.Entsize)
+		return nil, build.ErrBadEntsize
 	}
 	bo := f.hdr.ByteOrder()
 

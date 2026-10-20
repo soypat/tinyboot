@@ -38,7 +38,7 @@ func TestAppendStrLongName(t *testing.T) {
 	sec.sr = *io.NewSectionReader(bytes.NewReader(strtab), 0, int64(len(strtab)))
 
 	for i, want := range names {
-		got, err := fs.appendStr(nil, offs[i])
+		got, err := fs.appendStr(nil, offs[i], true)
 		if err != nil {
 			t.Fatalf("name %d (%d bytes): %s", i, len(want), err)
 		}
@@ -48,12 +48,31 @@ func TestAppendStrLongName(t *testing.T) {
 	}
 
 	// Appending must respect a destination that already holds bytes.
-	dst, err := fs.appendStr([]byte("PFX:"), offs[4])
+	dst, err := fs.appendStr([]byte("PFX:"), offs[4], true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(dst) != "PFX:"+names[4] {
 		t.Error("appendStr did not preserve the existing destination bytes")
+	}
+
+	// strEquals matches each name exactly, across fills, without allocating.
+	longer := make([]string, len(names))
+	for i, n := range names {
+		longer[i] = n + "x"
+	}
+	allocs := testing.AllocsPerRun(5, func() {
+		for i, want := range names {
+			if !fs.strEquals(offs[i], want) {
+				t.Errorf("name %d (%d bytes) does not equal itself", i, len(want))
+			}
+			if fs.strEquals(offs[i], longer[i]) || fs.strEquals(offs[i], want[:len(want)-1]) {
+				t.Errorf("name %d (%d bytes) equals a string one byte longer or shorter", i, len(want))
+			}
+		}
+	})
+	if allocs != 0 {
+		t.Errorf("strEquals allocates %v times", allocs)
 	}
 
 	// A table whose last entry has no terminator must error, not run off the end
@@ -64,17 +83,20 @@ func TestAppendStrLongName(t *testing.T) {
 	fs2 := FileSection{f: &f2, sindex: 0}
 	fs2.ptr().SizeOnFile = uint64(len(unterm))
 	fs2.ptr().sr = *io.NewSectionReader(bytes.NewReader(unterm), 0, int64(len(unterm)))
-	got, err := fs2.appendStr([]byte("PFX:"), 0)
+	got, err := fs2.appendStr([]byte("PFX:"), 0, true)
 	if err == nil {
 		t.Error("unterminated final string accepted")
 	}
 	if string(got) != "PFX:" {
 		t.Errorf("failed appendStr left %d bytes on the destination", len(got)-4)
 	}
+	if fs2.strEquals(0, string(unterm)) {
+		t.Error("unterminated final string compares equal")
+	}
 }
 
-// TestSectionNameBufferAliasing guards the destination SectionByName passes:
-// f.buf itself. A name needing more than one fill must not be corrupted by the
+// TestSectionNameBufferAliasing guards a caller passing f.buf itself as the
+// destination. A name needing more than one fill must not be corrupted by the
 // buffer its own reads go through.
 func TestSectionNameBufferAliasing(t *testing.T) {
 	// Every byte differs by position: a name of one repeated character would
@@ -90,7 +112,7 @@ func TestSectionNameBufferAliasing(t *testing.T) {
 	sec.SizeOnFile = uint64(len(strtab))
 	sec.sr = *io.NewSectionReader(bytes.NewReader(strtab), 0, int64(len(strtab)))
 
-	got, err := fs.appendStr(f.buf[:0], 1)
+	got, err := fs.appendStr(f.buf[:0], 1, true)
 	if err != nil {
 		t.Fatal(err)
 	}
