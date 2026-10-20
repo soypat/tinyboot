@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -194,24 +195,29 @@ func tileSymbols(f *xobj.File, mem bool) (tiling, error) {
 // nameBuf reads names through one buffer, grown to the longest name read.
 type nameBuf []byte
 
-// fit returns the buffer cut to n bytes, growing it first if it is shorter.
-func (nb *nameBuf) fit(n int) []byte {
+// grow makes the buffer at least n bytes long.
+func (nb *nameBuf) grow(n int) {
 	if n > len(*nb) {
 		*nb = make([]byte, max(n, 2*len(*nb)))
 	}
-	return (*nb)[:n]
 }
 
+// Names are read straight into the buffer, and their length asked for only
+// when it turns out too short. Asking first would cost an ELF name a second
+// read of its string table every time, where the buffer soon fits them all.
+
 func (nb *nameBuf) section(f *xobj.File, i int) (string, error) {
-	n, err := f.SectionNameLen(i)
+	n, err := f.ReadSectionName(*nb, i)
+	if err == io.ErrShortBuffer {
+		if n, err = f.SectionNameLen(i); err == nil {
+			nb.grow(n)
+			n, err = f.ReadSectionName(*nb, i)
+		}
+	}
 	if err != nil {
 		return "", err
 	}
-	name := nb.fit(n)
-	if _, err := f.ReadSectionName(name, i); err != nil {
-		return "", err
-	}
-	return string(name), nil
+	return string((*nb)[:n]), nil
 }
 
 // symbol returns a symbol's name, or for one the binary leaves unnamed a
@@ -220,7 +226,13 @@ func (nb *nameBuf) section(f *xobj.File, i int) (string, error) {
 // from symbols. The gc toolchain names no WebAssembly data segments at all, so
 // on its modules every segment is one of these.
 func (nb *nameBuf) symbol(f *xobj.File, sym xobj.Symbol) (string, error) {
-	n, err := f.SymbolNameLen(sym)
+	n, err := f.ReadSymbolName(*nb, sym)
+	if err == io.ErrShortBuffer {
+		if n, err = f.SymbolNameLen(sym); err == nil {
+			nb.grow(n)
+			n, err = f.ReadSymbolName(*nb, sym)
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -231,11 +243,7 @@ func (nb *nameBuf) symbol(f *xobj.File, sym xobj.Symbol) (string, error) {
 		}
 		return fmt.Sprintf("[%s %d]", space, sym.Index), nil
 	}
-	name := nb.fit(n)
-	if _, err := f.ReadSymbolName(name, sym); err != nil {
-		return "", err
-	}
-	return string(name), nil
+	return string((*nb)[:n]), nil
 }
 
 // profilePackages rolls a symbol profile up by the package each symbol belongs
